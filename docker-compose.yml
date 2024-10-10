@@ -1,0 +1,6 @@
+﻿services:
+  inngestexample:
+    image: inngestexample
+    build:
+      context: .
+      dockerfile: InngestExample/Dockerfile
