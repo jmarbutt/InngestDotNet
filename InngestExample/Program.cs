@@ -5,14 +5,23 @@ using Microsoft.AspNetCore.Mvc;
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
-// Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-var inngestClient = new InngestClient("your-event-key", "your-signing-key", "http://127.0.0.1:8288");
+// Create the Inngest client and add it to the service collection
+// In a real application, get these keys from configuration
+var inngestClient = new InngestClient(
+    eventKey: "your-event-key",
+    signingKey: "your-signing-key",
+    // For local development with dev server
+    apiOrigin: "http://127.0.0.1:8288",
+    eventApiOrigin: "http://127.0.0.1:8288");
 
-// Inject the InngestClient into the middleware
-builder.Services.AddSingleton(inngestClient);
+// Add a secret that will be accessible to the functions
+inngestClient.AddSecret("API_KEY", "your-api-key-here");
+
+// Register the Inngest client with DI 
+builder.Services.AddSingleton<IInngestClient>(inngestClient);
 
 var app = builder.Build();
 
@@ -25,46 +34,107 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
-
-
-
-// Register the function to handle "my-event"
+// Define a function with a simple event trigger
 inngestClient.CreateFunction("my-event-handler", async (context) =>
 {
     // Step 1: Log the event
     await context.Step("log-event", async () =>
     {
         Console.WriteLine($"Received my-event with data: {JsonSerializer.Serialize(context.Event.Data)}");
+        await Task.Delay(1); // Add await to avoid compiler warning
         return true;
     });
 
     // Step 2: Sleep for 1 second
     await context.Sleep("wait-a-moment", TimeSpan.FromSeconds(1));
 
-    // Step 3: Process the event
+    // Step 3: Process the event (with retry options)
+    var stepOptions = new StepOptions
+    {
+        Retry = new RetryOptions
+        {
+            Attempts = 3,
+            Interval = 1000,
+            Factor = 2.0
+        }
+    };
+
     var result = await context.Step("process-event", async () =>
     {
-        // Example: Perform some operation based on the event data
+        // Example: Access event data
         var eventData = context.Event.Data;
-        // var someProperty = ((JsonElement)eventData).GetProperty("someProperty").GetString();
-
-        return new { message = "my-event processed successfully" };
-    });
+        
+        // You can also access secrets
+        var apiKey = context.GetSecret("API_KEY");
+        
+        await Task.Delay(1); // Add await to avoid compiler warning
+        return new { message = "my-event processed successfully", timestamp = DateTime.UtcNow };
+    }, stepOptions);
 
     return result;
 });
 
-app.MapPost("/api/test_api/trigger-my-event", async ([FromBody] object eventData) =>
+// Register a function with cron trigger
+var cronTrigger = FunctionTrigger.CreateCronTrigger("*/30 * * * *"); // Run every 30 minutes
+inngestClient.CreateFunction(
+    id: "scheduled-task",
+    name: "Scheduled Background Task",
+    triggers: new[] { cronTrigger },
+    handler: async (context) =>
+    {
+        await context.Step("run-schedule", async () =>
+        {
+            Console.WriteLine($"Running scheduled task at {DateTime.UtcNow}");
+            // Your scheduled task logic here
+            await Task.Delay(1); // Add await to avoid compiler warning
+            return new { completed = true, time = DateTime.UtcNow };
+        });
+
+        return new { status = "success" };
+    },
+    options: new FunctionOptions
+    {
+        Concurrency = 1,
+        Retry = new RetryOptions
+        {
+            Attempts = 3
+        }
+    }
+);
+
+// Create an API endpoint to trigger events
+app.MapPost("/api/trigger-event", async ([FromBody] EventRequest request) =>
 {
-    // Send the "my-event" event
-    var result = await inngestClient.SendEventAsync("my-event", eventData);
-    return Results.Ok(result);
+    if (string.IsNullOrEmpty(request.EventName))
+    {
+        return Results.BadRequest("Event name is required");
+    }
+
+    // Create and send an event
+    var evt = new InngestEvent(request.EventName, request.Data ?? new { });
+    
+    // Optionally add user information
+    if (request.UserId != null)
+    {
+        evt.WithUser(new { id = request.UserId });
+    }
+    
+    // Send the event
+    var result = await inngestClient.SendEventAsync(evt);
+    
+    return Results.Ok(new { success = result });
 });
 
-
-
-
-app.UseInngest("/api/inngest");
+// Route to handle Inngest webhooks
+app.UseInngest();
 
 app.Run();
+
+// Request model for the trigger endpoint
+public class EventRequest
+{
+    public required string EventName { get; set; }
+    public object? Data { get; set; }
+    public string? UserId { get; set; }
+}
 
