@@ -65,7 +65,7 @@ public class InngestClient : IInngestClient
         var functionDefinition = new FunctionDefinition(
             functionId,         // id
             functionId,         // name
-            new[] { trigger },  // triggers
+            [trigger],  // triggers
             handler,            // handler
             null                // options
         );
@@ -103,10 +103,7 @@ public class InngestClient : IInngestClient
     public async Task<bool> SendEventAsync(InngestEvent evt)
     {
         // Ensure required fields
-        if (evt.Id == null)
-        {
-            evt.Id = Guid.NewGuid().ToString();
-        }
+        evt.Id ??= Guid.NewGuid().ToString();
         
         var payload = new { events = new[] { evt } };
         var content = new StringContent(JsonSerializer.Serialize(payload, _jsonOptions), Encoding.UTF8, "application/json");
@@ -121,12 +118,9 @@ public class InngestClient : IInngestClient
     public async Task<bool> SendEventsAsync(IEnumerable<InngestEvent> events)
     {
         // Ensure required fields for all events
-        var eventsArray = events.Select(evt => 
+        var eventsArray = events.Select(evt =>
         {
-            if (evt.Id == null)
-            {
-                evt.Id = Guid.NewGuid().ToString();
-            }
+            evt.Id ??= Guid.NewGuid().ToString();
             return evt;
         }).ToArray();
         
@@ -376,7 +370,7 @@ public class InngestClient : IInngestClient
             function_count = _functions.Count,
             has_event_key = !string.IsNullOrEmpty(_eventKey),
             has_signing_key = !string.IsNullOrEmpty(_signingKey),
-            mode = "dev",
+            mode = "cloud",
             schema_version = "2024-05-15"
         };
 
