@@ -172,6 +172,14 @@ inngestClient.CreateFunction("example-with-secrets", async (context) =>
 });
 ```
 
+## Running Inngest Dev Server
+
+```
+npx inngest-cli@latest dev -u http://localhost:5050/api/inngest --no-discovery
+```
+
 ## License
 
 MIT
+
+

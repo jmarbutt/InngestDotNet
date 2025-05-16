@@ -207,15 +207,44 @@ public class InngestClient : IInngestClient
             } : null
         }).ToArray();
 
-        var syncResult = new SyncResponsePayload
+        // Create register payload for Dev Server - this is the key part for the out-of-band sync
+        var registerPayload = new
         {
-            AppId = syncPayload.AppId,
-            Functions = functionDefinitions,
-            Modified = true
+            app_id = syncPayload.AppId,
+            framework = "inngest-dotnet",
+            framework_version = "0.1.0",
+            url = request.Headers.Origin.ToString() ?? "http://localhost",
+            sdk_version = "0.1.0",
+            functions = functionDefinitions
         };
 
-        response.StatusCode = StatusCodes.Status200OK;
-        await response.WriteAsJsonAsync(syncResult, _jsonOptions);
+        // Send POST request to Dev Server's /fn/register endpoint
+        var registerContent = new StringContent(
+            JsonSerializer.Serialize(registerPayload, _jsonOptions), 
+            Encoding.UTF8, 
+            "application/json");
+        
+        var registerUrl = $"{_apiOrigin}/fn/register";
+        var registerResponse = await _httpClient.PostAsync(registerUrl, registerContent);
+
+        if (registerResponse.IsSuccessStatusCode)
+        {
+            var syncResult = new SyncResponsePayload
+            {
+                AppId = syncPayload.AppId,
+                Functions = functionDefinitions,
+                Modified = true
+            };
+
+            response.StatusCode = StatusCodes.Status200OK;
+            await response.WriteAsJsonAsync(syncResult, _jsonOptions);
+        }
+        else
+        {
+            var errorContent = await registerResponse.Content.ReadAsStringAsync();
+            response.StatusCode = (int)registerResponse.StatusCode;
+            await response.WriteAsJsonAsync(new { error = $"Sync failed: {errorContent}" });
+        }
     }
 
     private class SyncRequestPayload
