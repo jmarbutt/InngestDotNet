@@ -72,6 +72,15 @@ inngestClient.CreateFunction("my-event-handler", async (context) =>
     }, stepOptions);
 
     return result;
+})
+// Register the steps so Inngest knows about them during sync
+.WithStep("log-event", "Log the event data") 
+.WithSleep("wait-a-moment", 1)
+.WithStep("process-event", "Process the event data", new RetryOptions
+{
+    Attempts = 3,
+    Interval = 1000,
+    Factor = 2.0
 });
 
 // Register a function with cron trigger
@@ -100,7 +109,9 @@ inngestClient.CreateFunction(
             Attempts = 3
         }
     }
-);
+)
+// Register the steps so Inngest knows about them during sync
+.WithStep("run-schedule", "Run the scheduled task");
 
 // Create an API endpoint to trigger events
 app.MapPost("/api/trigger-event", async ([FromBody] EventRequest request) =>

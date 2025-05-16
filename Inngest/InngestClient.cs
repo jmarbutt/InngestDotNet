@@ -58,28 +58,32 @@ public class InngestClient : IInngestClient
     /// <summary>
     /// Register a new function using the simplified API
     /// </summary>
-    public void CreateFunction(string functionId, Func<InngestContext, Task<object>> handler)
+    /// <returns>The function definition for chaining step definitions</returns>
+    public FunctionDefinition CreateFunction(string functionId, Func<InngestContext, Task<object>> handler)
     {
         // Create a basic function with the provided ID that triggers on a matching event name
         var trigger = FunctionTrigger.CreateEventTrigger(functionId);
         var functionDefinition = new FunctionDefinition(
             functionId,         // id
             functionId,         // name
-            [trigger],  // triggers
+            [trigger],          // triggers
             handler,            // handler
             null                // options
         );
         
         _functions[functionId] = functionDefinition;
+        return functionDefinition;
     }
     
     /// <summary>
     /// Register a new function with full configuration options
     /// </summary>
-    public void CreateFunction(string id, string name, FunctionTrigger[] triggers, Func<InngestContext, Task<object>> handler, FunctionOptions? options = null)
+    /// <returns>The function definition for chaining step definitions</returns>
+    public FunctionDefinition CreateFunction(string id, string name, FunctionTrigger[] triggers, Func<InngestContext, Task<object>> handler, FunctionOptions? options = null)
     {
         var functionDefinition = new FunctionDefinition(id, name, triggers, handler, options);
         _functions[id] = functionDefinition;
+        return functionDefinition;
     }
 
     /// <summary>
@@ -189,7 +193,20 @@ public class InngestClient : IInngestClient
                 Event = t.Event,
                 Constraint = t.Constraint?.Expression
             }).ToArray(),
-            Steps = new Dictionary<string, object>(),
+            Steps = fn.Steps.ToDictionary(
+                step => step.Id,
+                step => (object)new
+                {
+                    id = step.Id,
+                    name = step.Name,
+                    retry = step.RetryOptions != null ? new RetryOptionsResponse
+                    {
+                        Attempts = step.RetryOptions.Attempts,
+                        Interval = step.RetryOptions.Interval,
+                        Factor = step.RetryOptions.Factor,
+                        MaxInterval = step.RetryOptions.MaxInterval
+                    } : null
+                }),
             Options = fn.Options != null ? new FunctionOptionsResponse
             {
                 Concurrency = fn.Options.Concurrency,

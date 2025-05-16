@@ -28,12 +28,14 @@ public interface IInngestClient
     /// <summary>
     /// Register a new function using the simplified API
     /// </summary>
-    void CreateFunction(string functionId, Func<InngestContext, Task<object>> handler);
+    /// <returns>The function definition for chaining step definitions</returns>
+    FunctionDefinition CreateFunction(string functionId, Func<InngestContext, Task<object>> handler);
     
     /// <summary>
     /// Register a new function with full configuration options
     /// </summary>
-    void CreateFunction(string id, string name, FunctionTrigger[] triggers, Func<InngestContext, Task<object>> handler, FunctionOptions? options = null);
+    /// <returns>The function definition for chaining step definitions</returns>
+    FunctionDefinition CreateFunction(string id, string name, FunctionTrigger[] triggers, Func<InngestContext, Task<object>> handler, FunctionOptions? options = null);
     
     /// <summary>
     /// Handle incoming requests from the Inngest service

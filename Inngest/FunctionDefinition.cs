@@ -31,6 +31,11 @@ public class FunctionDefinition
     public Func<InngestContext, Task<object>> Handler { get; set; } = null!;
     
     /// <summary>
+    /// List of steps defined for this function
+    /// </summary>
+    public List<StepDefinition> Steps { get; } = new();
+    
+    /// <summary>
     /// Create a new function definition
     /// </summary>
     public FunctionDefinition(string id, string name, FunctionTrigger[] triggers, Func<InngestContext, Task<object>> handler, FunctionOptions? options = null)
@@ -40,6 +45,14 @@ public class FunctionDefinition
         Triggers = triggers;
         Handler = handler;
         Options = options;
+    }
+    
+    /// <summary>
+    /// Adds a step definition to this function
+    /// </summary>
+    public void AddStep(string id, string? name = null, RetryOptions? retryOptions = null)
+    {
+        Steps.Add(new StepDefinition(id, name, retryOptions));
     }
 }
 
@@ -146,4 +159,35 @@ public class RetryOptions
     /// Maximum interval between retries in milliseconds
     /// </summary>
     public int? MaxInterval { get; set; }
+}
+
+/// <summary>
+/// Defines a step within an Inngest function
+/// </summary>
+public class StepDefinition
+{
+    /// <summary>
+    /// The ID of the step
+    /// </summary>
+    public string Id { get; set; }
+    
+    /// <summary>
+    /// Display name for the step (optional)
+    /// </summary>
+    public string? Name { get; set; }
+    
+    /// <summary>
+    /// Retry configuration for the step
+    /// </summary>
+    public RetryOptions? RetryOptions { get; set; }
+    
+    /// <summary>
+    /// Create a new step definition
+    /// </summary>
+    public StepDefinition(string id, string? name = null, RetryOptions? retryOptions = null)
+    {
+        Id = id;
+        Name = name;
+        RetryOptions = retryOptions;
+    }
 }

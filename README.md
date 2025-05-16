@@ -172,6 +172,47 @@ inngestClient.CreateFunction("example-with-secrets", async (context) =>
 });
 ```
 
+## Function Steps Registration
+
+When creating functions with Inngest, you must register all steps that your function will use. This ensures that the Inngest server knows about your function's structure during sync.
+
+```csharp
+// Define a function with steps
+inngestClient.CreateFunction("my-function", async (context) =>
+{
+    // Step 1: Log the event
+    await context.Step("log-event", async () =>
+    {
+        Console.WriteLine("Processing event...");
+        return true;
+    });
+
+    // Step 2: Sleep for a moment
+    await context.Sleep("wait-a-bit", TimeSpan.FromSeconds(1));
+
+    // Step 3: Process data with retry options
+    var result = await context.Step("process-data", async () =>
+    {
+        // Your logic here
+        return new { success = true };
+    }, new StepOptions
+    {
+        Retry = new RetryOptions { Attempts = 3 }
+    });
+
+    return result;
+})
+// Register the steps so Inngest knows about them during sync
+.WithStep("log-event", "Log the event data") 
+.WithSleep("wait-a-bit", 1)
+.WithStep("process-data", "Process data with retries", new RetryOptions
+{
+    Attempts = 3
+});
+```
+
+If steps are not registered, Inngest will throw errors like "Function has no steps" during sync.
+
 ## Running Inngest Dev Server
 
 ```
