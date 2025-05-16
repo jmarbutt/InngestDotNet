@@ -140,7 +140,7 @@ app.MapPost("/api/trigger-event", async ([FromBody] EventRequest request) =>
 });
 
 // Route to handle Inngest webhooks
-app.UseInngest();
+app.UseInngest("/api/inngest");
 
 app.Run();
 

@@ -313,9 +313,16 @@ public class InngestClient : IInngestClient
                 host = $"{scheme}://{host}";
             }
             
+            // Use the full request path if servePath is not specified
             var path = string.IsNullOrEmpty(servePath) 
-                ? request.Path.ToString() 
+                ? request.PathBase.ToString() 
                 : servePath;
+            
+            // Ensure path starts with a slash if it's not empty
+            if (!string.IsNullOrEmpty(path) && !path.StartsWith("/"))
+            {
+                path = $"/{path}";
+            }
             
             url = $"{host}{path}";
         }
@@ -367,7 +374,7 @@ public class InngestClient : IInngestClient
                         runtime = new
                         {
                             type = "http",
-                            url = $"{url.TrimEnd('/')}?stepId=step&fnId={fn.Id}"
+                            url = $"{url.TrimEnd('/')}?stepId=step&fnId={fn.Id}" // Use the base URL from the request path or INNGEST_SERVE_PATH
                         },
                         retries = retries
                     }
@@ -388,6 +395,9 @@ public class InngestClient : IInngestClient
             framework = "aspnetcore",
             functions = fnArray
         };
+        
+        // Log information about registration for debugging
+        Console.WriteLine($"Registering Inngest functions with URL: {url}");
 
         // Prepare the register URL
         var registerUrl = $"{_apiOrigin}/fn/register";
