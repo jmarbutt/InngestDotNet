@@ -8,6 +8,9 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
+// Ensure dev mode is enabled for local development
+Environment.SetEnvironmentVariable("INNGEST_DEV", "true");
+
 // Create the Inngest client and add it to the service collection
 // In a real application, get these keys from configuration
 var inngestClient = new InngestClient(

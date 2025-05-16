@@ -4,24 +4,28 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 
 /// <summary>
-/// Represents an event in the Inngest system
+/// Represents an event in the Inngest system according to the SDK specification
 /// </summary>
-public class InngestEvent
+public class InngestEvent : IInngestEvent
 {
     /// <summary>
-    /// Unique identifier for the event
+    /// Unique identifier for the event.
+    /// A unique ID used to idempotently process a given event payload.
     /// </summary>
     [JsonPropertyName("id")]
     public string? Id { get; set; }
 
     /// <summary>
     /// Name of the event in dot.separated.format
+    /// We recommend using lowercase dot notation for names, prepending `prefixes/` with a slash for organization.
+    /// e.g. `cloudwatch/alarms.triggered`, `cart/session.created`
     /// </summary>
     [JsonPropertyName("name")]
     public string Name { get; set; } = string.Empty;
 
     /// <summary>
-    /// Custom data payload for the event
+    /// Custom data payload for the event.
+    /// Must be an object, in order to encourage evolving data.
     /// </summary>
     [JsonPropertyName("data")]
     public object Data { get; set; } = new();
@@ -37,18 +41,6 @@ public class InngestEvent
     /// </summary>
     [JsonPropertyName("user")]
     public object? User { get; set; }
-
-    /// <summary>
-    /// Optional version of the event schema
-    /// </summary>
-    [JsonPropertyName("v")]
-    public string? Version { get; set; }
-
-    /// <summary>
-    /// Optional errors associated with this event
-    /// </summary>
-    [JsonPropertyName("errors")]
-    public List<string>? Errors { get; set; }
 
     /// <summary>
     /// Optional idempotency key to prevent duplicate processing

@@ -46,6 +46,32 @@ app.UseInngest("/api/inngest");
 app.Run();
 ```
 
+## Environment Variables
+
+The SDK supports the following environment variables as specified by the Inngest SDK specification:
+
+### Critical Variables
+
+- `INNGEST_EVENT_KEY` - Your Inngest event key for sending events
+- `INNGEST_SIGNING_KEY` - Your Inngest signing key for authentication
+- `INNGEST_SIGNING_KEY_FALLBACK` - Optional fallback signing key
+- `INNGEST_ENV` - The environment name to use when sending events
+
+### Optional Variables
+
+- `INNGEST_DEV` - Set to any non-empty value to use the Inngest Dev Server (or provide a URL like `http://localhost:8288`)
+- `INNGEST_API_BASE_URL` - Override the Inngest API URL
+- `INNGEST_EVENT_API_BASE_URL` - Override the Inngest Event API URL
+- `INNGEST_SERVE_ORIGIN` - The origin (base URL) for your application that Inngest will call
+- `INNGEST_SERVE_PATH` - The path for the Inngest endpoint in your application
+
+When instantiating the client directly, you can omit parameters and they'll be read from environment variables:
+
+```csharp
+// This will use environment variables for configuration
+var inngestClient = new InngestClient();
+```
+
 ## Sending Events
 
 ```csharp
@@ -216,7 +242,7 @@ If steps are not registered, Inngest will throw errors like "Function has no ste
 ## Running Inngest Dev Server
 
 ```
-npx inngest-cli@latest dev -u http://localhost:5050/api/inngest --no-discovery
+npx inngest-cli@latest dev --no-discovery
 ```
 
 ## License

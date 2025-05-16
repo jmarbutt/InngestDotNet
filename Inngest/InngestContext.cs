@@ -117,11 +117,37 @@ public class InngestContext
     /// <returns>A task representing the asynchronous operation</returns>
     public async Task Sleep(string id, TimeSpan duration)
     {
-        await Step(id, async () =>
+        // According to SDK spec, Sleep steps need to be reported to Inngest server with a 206 Partial Content
+        // Check if this step has been memoized already
+        if (Steps.TryGetValue(id, out var stepResult))
         {
+            // If already memoized, it means Inngest has decided the sleep is done
+            return;
+        }
+        
+        // If executing locally and not in a distributed environment
+        if (Ctx.DisableImmediateExecution == false && _client == null)
+        {
+            // Perform local sleep
             await Task.Delay(duration);
-            return true;
-        });
+            return;
+        }
+        
+        // Otherwise, this step needs to be reported to Inngest to schedule a sleep
+        // This is just a stub - the actual SDK implementation would need to return a 206 response here
+        // with the Sleep operation according to the spec
+        throw new NotImplementedException("Sleep step reporting to Inngest server is not implemented yet");
+    }
+    
+    /// <summary>
+    /// Introduces a delay in the function execution with a specified number of seconds
+    /// </summary>
+    /// <param name="id">Unique identifier for the sleep step</param>
+    /// <param name="seconds">The number of seconds to sleep</param>
+    /// <returns>A task representing the asynchronous operation</returns>
+    public Task Sleep(string id, int seconds)
+    {
+        return Sleep(id, TimeSpan.FromSeconds(seconds));
     }
 
     /// <summary>
@@ -196,12 +222,47 @@ public class StepOptions
 public class StepExecutionException : Exception
 {
     /// <summary>
+    /// Gets whether this exception should not be retried
+    /// </summary>
+    public bool NoRetry { get; }
+    
+    /// <summary>
+    /// Gets the amount of time to wait before retrying
+    /// </summary>
+    public TimeSpan? RetryAfter { get; }
+    
+    /// <summary>
     /// Creates a new StepExecutionException with the specified message and inner exception
     /// </summary>
     /// <param name="message">The error message</param>
     /// <param name="innerException">The inner exception that caused this exception</param>
-    public StepExecutionException(string message, Exception innerException) 
+    /// <param name="noRetry">Whether this error should not be retried</param>
+    public StepExecutionException(string message, Exception innerException, bool noRetry = false) 
         : base(message, innerException)
     {
+        NoRetry = noRetry;
+    }
+    
+    /// <summary>
+    /// Creates a new StepExecutionException with the specified message and inner exception
+    /// </summary>
+    /// <param name="message">The error message</param>
+    /// <param name="innerException">The inner exception that caused this exception</param>
+    /// <param name="retryAfter">How long to wait before retrying</param>
+    public StepExecutionException(string message, Exception innerException, TimeSpan retryAfter) 
+        : base(message, innerException)
+    {
+        RetryAfter = retryAfter;
+    }
+    
+    /// <summary>
+    /// Creates a new StepExecutionException with the specified message
+    /// </summary>
+    /// <param name="message">The error message</param>
+    /// <param name="noRetry">Whether this error should not be retried</param>
+    public StepExecutionException(string message, bool noRetry = false) 
+        : base(message)
+    {
+        NoRetry = noRetry;
     }
 }

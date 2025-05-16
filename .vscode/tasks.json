@@ -10,7 +10,12 @@
 			"problemMatcher": [
 				"$msCompile"
 			],
-			"isBackground": true
+			"isBackground": true,
+			"options": {
+				"env": {
+					"INNGEST_DEV": "true"
+				}
+			}
 		}
 	]
 }
