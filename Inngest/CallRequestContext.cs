@@ -41,5 +41,6 @@ public class CallRequestContext
     /// Environment variables for the function
     /// </summary>
     [JsonPropertyName("env")]
+    [JsonConverter(typeof(JsonConverters.StringToDictionaryConverter))]
     public Dictionary<string, string>? Env { get; set; }
 }

@@ -580,73 +580,88 @@ public class InngestClient : IInngestClient
                 stepId = stepIdValues.FirstOrDefault();
             }
 
-            // Parse request body
-            string requestBody = await new StreamReader(request.Body).ReadToEndAsync();
-            var payload = JsonSerializer.Deserialize<CallRequestPayload>(requestBody, _jsonOptions);
-                
-            if (payload == null)
+            // Parse request body as CallRequestPayload
+            request.EnableBuffering();
+            var str = await new StreamReader(request.Body, leaveOpen: true).ReadToEndAsync();
+            request.Body.Position = 0; // Reset position so we can read it again
+            var payload = await request.ReadFromJsonAsync<CallRequestPayload>(_jsonOptions);
+            if (payload == null || payload.Event == null)
             {
                 response.StatusCode = StatusCodes.Status400BadRequest;
                 await response.WriteAsJsonAsync(new { error = "Invalid request payload" }, _jsonOptions);
                 return;
             }
 
-            // If use_api is true, we need to retrieve the full payload from Inngest server
-            if (payload.Ctx.UseApi)
+            // Get the first event
+            var firstEvent = payload.Event;
+
+            // Extract function ID from the first event's data._inngest.fn_id
+            string? fnId = null;
+            if (firstEvent.Data is JsonElement dataElement &&
+                dataElement.TryGetProperty("_inngest", out var inngestElement) &&
+                inngestElement.TryGetProperty("fn_id", out var fnIdElement) &&
+                fnIdElement.ValueKind == JsonValueKind.String)
             {
-                // Retrieve events from Inngest API
-                var eventsUrl = $"{_apiOrigin}/v0/runs/{payload.Ctx.RunId}/batch";
-                var eventsResponse = await _httpClient.GetAsync(eventsUrl);
-                
-                if (!eventsResponse.IsSuccessStatusCode)
-                {
-                    response.StatusCode = StatusCodes.Status500InternalServerError;
-                    await response.WriteAsJsonAsync(new { error = "Failed to retrieve batch events from Inngest API" }, _jsonOptions);
-                    return;
-                }
-                
-                var eventsJson = await eventsResponse.Content.ReadAsStringAsync();
-                var events = JsonSerializer.Deserialize<IEnumerable<InngestEvent>>(eventsJson, _jsonOptions);
-                
-                if (events != null && events.Any())
-                {
-                    payload.Events = events;
-                    payload.Event = events.First();
-                }
-                
-                // Retrieve memoized step data from Inngest API
-                var actionsUrl = $"{_apiOrigin}/v0/runs/{payload.Ctx.RunId}/actions";
-                var actionsResponse = await _httpClient.GetAsync(actionsUrl);
-                
-                if (!actionsResponse.IsSuccessStatusCode)
-                {
-                    response.StatusCode = StatusCodes.Status500InternalServerError;
-                    await response.WriteAsJsonAsync(new { error = "Failed to retrieve step data from Inngest API" }, _jsonOptions);
-                    return;
-                }
-                
-                var actionsJson = await actionsResponse.Content.ReadAsStringAsync();
-                var steps = JsonSerializer.Deserialize<Dictionary<string, object>>(actionsJson, _jsonOptions);
-                
-                if (steps != null)
-                {
-                    payload.Steps = steps;
-                }
+                fnId = fnIdElement.GetString();
             }
 
-            // Override functionId from query string if provided
+            // Override function ID from query parameter if provided
             if (!string.IsNullOrEmpty(functionId))
             {
-                payload.Ctx.FunctionId = functionId;
+                fnId = functionId;
+            }
+
+            // Validate function ID
+            if (string.IsNullOrEmpty(fnId))
+            {
+                response.StatusCode = StatusCodes.Status400BadRequest;
+                await response.WriteAsJsonAsync(new { error = "Function ID is required" }, _jsonOptions);
+                return;
+            }
+
+            string runId = firstEvent.Id ?? Guid.NewGuid().ToString();
+
+            // Ensure the payload has all required fields
+            if (payload.Steps == null)
+            {
+                payload.Steps = new Dictionary<string, object>();
+            }
+            
+            if (payload.Events == null)
+            {
+                payload.Events = new List<InngestEvent> { firstEvent };
+            }
+            
+            if (payload.Ctx == null)
+            {
+                payload.Ctx = new CallRequestContext
+                {
+                    FunctionId = fnId,
+                    RunId = runId,
+                    UseApi = false
+                };
+            }
+            
+            if (payload.Secrets == null)
+            {
+                payload.Secrets = new Dictionary<string, string>(_secrets ?? new Dictionary<string, string>());
             }
             
             // Extract app-specific function ID (strip off the app prefix if present)
-            string actualFunctionId = payload.Ctx.FunctionId;
-            if (actualFunctionId.StartsWith($"{_appId}-"))
+            string actualFunctionId = fnId;
+            if (actualFunctionId != null && actualFunctionId.StartsWith($"{_appId}-"))
             {
                 actualFunctionId = actualFunctionId.Substring(_appId.Length + 1);
             }
 
+            // Ensure actualFunctionId is not null to prevent errors
+            if (string.IsNullOrEmpty(actualFunctionId))
+            {
+                response.StatusCode = StatusCodes.Status400BadRequest;
+                await response.WriteAsJsonAsync(new { error = "Invalid function ID" }, _jsonOptions);
+                return;
+            }
+            
             var inngestContext = new InngestContext(
                 payload.Event, 
                 payload.Events, 
@@ -654,12 +669,12 @@ public class InngestClient : IInngestClient
                 new CallRequestContext
                 {
                     // Copy all properties from payload.Ctx, but override FunctionId
-                    RunId = payload.Ctx.RunId,
+                    RunId = payload.Ctx?.RunId ?? Guid.NewGuid().ToString(),
                     FunctionId = actualFunctionId,
-                    UseApi = payload.Ctx.UseApi,
+                    UseApi = payload.Ctx?.UseApi ?? false,
                     // Add any other properties that CallRequestContext has
                 },
-                payload.Secrets ?? _secrets,
+                payload.Secrets ?? _secrets ?? new Dictionary<string, string>(),
                 this);
 
             if (_functions.TryGetValue(actualFunctionId, out var function))
