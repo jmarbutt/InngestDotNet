@@ -5,20 +5,27 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <Title>Inngest.NET</Title>
-        <Authors>Your Name</Authors>
-        <Description>A .NET SDK for Inngest, a platform for building reliable, scalable event-driven applications.</Description>
-        <PackageProjectUrl>https://github.com/yourusername/InngestDotNet</PackageProjectUrl>
-        <PackageTags>inngest;event-driven;async;background-jobs</PackageTags>
+        <Authors>Jonathan Marbutt</Authors>
+        <Description>A .NET SDK for Inngest - build reliable, durable workflows with automatic retries, scheduling, and step-by-step execution.</Description>
+        <PackageProjectUrl>https://github.com/jmarbutt/InngestDotNet</PackageProjectUrl>
+        <RepositoryUrl>https://github.com/jmarbutt/InngestDotNet</RepositoryUrl>
+        <PackageTags>inngest;event-driven;async;background-jobs;workflows;durable-execution;serverless</PackageTags>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>
         <GenerateDocumentationFile>true</GenerateDocumentationFile>
-        <Version>0.1.0</Version>
+        <Version>0.2.0</Version>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
     </PropertyGroup>
-    
+
     <ItemGroup>
-        <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.5" />
+        <FrameworkReference Include="Microsoft.AspNetCore.App" />
         <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="9.0.5" />
         <PackageReference Include="Microsoft.Extensions.Http" Version="9.0.5" />
+        <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.5" />
         <PackageReference Include="System.Text.Json" Version="9.0.5" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <None Include="..\README.md" Pack="true" PackagePath="\" />
     </ItemGroup>
 
 </Project>

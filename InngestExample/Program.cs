@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Inngest;
+using Inngest.Steps;
 using Microsoft.AspNetCore.Mvc;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -11,19 +12,15 @@ builder.Services.AddSwaggerGen();
 // Ensure dev mode is enabled for local development
 Environment.SetEnvironmentVariable("INNGEST_DEV", "true");
 
-// Create the Inngest client and add it to the service collection
-// In a real application, get these keys from configuration
+// Create the Inngest client
 var inngestClient = new InngestClient(
     eventKey: "your-event-key",
     signingKey: "your-signing-key",
-    // For local development with dev server
     apiOrigin: "http://127.0.0.1:8288",
-    eventApiOrigin: "http://127.0.0.1:8288");
+    eventApiOrigin: "http://127.0.0.1:8288",
+    appId: "my-dotnet-app");
 
-// Add a secret that will be accessible to the functions
-inngestClient.AddSecret("API_KEY", "your-api-key-here");
-
-// Register the Inngest client with DI 
+// Register the Inngest client with DI
 builder.Services.AddSingleton<IInngestClient>(inngestClient);
 
 var app = builder.Build();
@@ -37,86 +34,158 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
-// Define a function with a simple event trigger
-inngestClient.CreateFunction("my-event-handler", async (context) =>
+// =============================================================================
+// Example 1: Simple event-triggered function with steps
+// =============================================================================
+inngestClient.CreateFunction("my-event-handler", async (ctx) =>
 {
-    // Step 1: Log the event
-    await context.Step("log-event", async () =>
+    // Step 1: Log the event (memoized - only runs once)
+    var logged = await ctx.Step.Run("log-event", async () =>
     {
-        Console.WriteLine($"Received my-event with data: {JsonSerializer.Serialize(context.Event.Data)}");
-        await Task.Delay(1); // Add await to avoid compiler warning
+        Console.WriteLine($"Received my-event-handler with data: {JsonSerializer.Serialize(ctx.Event.Data)}");
+        await Task.Delay(10); // Simulate some work
         return true;
     });
 
-    // Step 2: Sleep for 1 second
-    await context.Sleep("wait-a-moment", TimeSpan.FromSeconds(1));
+    // Step 2: Sleep for 5 seconds (durable - survives restarts)
+    await ctx.Step.Sleep("wait-a-moment", TimeSpan.FromSeconds(5));
 
-    // Step 3: Process the event (with retry options)
-    var stepOptions = new StepOptions
+    // Step 3: Process the event with retry options
+    var result = await ctx.Step.Run("process-event", async () =>
     {
-        Retry = new RetryOptions
+        // Access event data
+        var eventData = ctx.Event.Data;
+
+        // Simulate processing
+        await Task.Delay(100);
+
+        return new
         {
-            Attempts = 3,
-            Interval = 1000,
-            Factor = 2.0
-        }
-    };
-
-    var result = await context.Step("process-event", async () =>
+            message = "Event processed successfully",
+            timestamp = DateTime.UtcNow,
+            runId = ctx.Run.RunId
+        };
+    }, new StepRunOptions
     {
-        // Example: Access event data
-        var eventData = context.Event.Data;
-        
-        // You can also access secrets
-        var apiKey = context.GetSecret("API_KEY");
-        
-        await Task.Delay(1); // Add await to avoid compiler warning
-        return new { message = "my-event processed successfully", timestamp = DateTime.UtcNow };
-    }, stepOptions);
+        Name = "Process Event Data"
+    });
 
     return result;
-})
-// Register the steps so Inngest knows about them during sync
-.WithStep("log-event", "Log the event data") 
-.WithSleep("wait-a-moment", 1)
-.WithStep("process-event", "Process the event data", new RetryOptions
-{
-    Attempts = 3,
-    Interval = 1000,
-    Factor = 2.0
 });
 
-// Register a function with cron trigger
+// =============================================================================
+// Example 2: Scheduled function (cron trigger)
+// =============================================================================
 var cronTrigger = FunctionTrigger.CreateCronTrigger("*/30 * * * *"); // Run every 30 minutes
 inngestClient.CreateFunction(
     id: "scheduled-task",
     name: "Scheduled Background Task",
     triggers: new[] { cronTrigger },
-    handler: async (context) =>
+    handler: async (ctx) =>
     {
-        await context.Step("run-schedule", async () =>
+        var report = await ctx.Step.Run("generate-report", async () =>
         {
             Console.WriteLine($"Running scheduled task at {DateTime.UtcNow}");
-            // Your scheduled task logic here
-            await Task.Delay(1); // Add await to avoid compiler warning
-            return new { completed = true, time = DateTime.UtcNow };
+            await Task.Delay(50);
+            return new { generated = DateTime.UtcNow, items = 42 };
         });
 
-        return new { status = "success" };
+        await ctx.Step.Run("send-notification", async () =>
+        {
+            Console.WriteLine($"Report generated with {report.items} items");
+            await Task.Delay(10);
+            return true;
+        });
+
+        return new { status = "success", report };
     },
     options: new FunctionOptions
     {
         Concurrency = 1,
-        Retry = new RetryOptions
-        {
-            Attempts = 3
-        }
+        Retry = new RetryOptions { Attempts = 3 }
     }
-)
-// Register the steps so Inngest knows about them during sync
-.WithStep("run-schedule", "Run the scheduled task");
+);
 
-// Create an API endpoint to trigger events
+// =============================================================================
+// Example 3: Multi-step workflow demonstrating durable execution
+// =============================================================================
+inngestClient.CreateFunction(
+    id: "order-workflow",
+    name: "Process Order Workflow",
+    triggers: new[] { FunctionTrigger.CreateEventTrigger("shop/order.created") },
+    handler: async (ctx) =>
+    {
+        // Step 1: Validate order
+        var order = await ctx.Step.Run("validate-order", () =>
+        {
+            // Synchronous step (no async needed)
+            var orderId = Guid.NewGuid().ToString();
+            return new { orderId, status = "validated", amount = 99.99 };
+        });
+
+        // Step 2: Reserve inventory (with retry)
+        var inventory = await ctx.Step.Run("reserve-inventory", async () =>
+        {
+            await Task.Delay(100);
+            return new { reserved = true, sku = "PROD-001" };
+        });
+
+        // Step 3: Process payment
+        var payment = await ctx.Step.Run("process-payment", async () =>
+        {
+            await Task.Delay(200);
+            return new { transactionId = Guid.NewGuid().ToString(), success = true };
+        });
+
+        // Step 4: Wait for payment webhook (with timeout)
+        // Note: WaitForEvent will return null if timeout is reached
+        var confirmation = await ctx.Step.WaitForEvent<PaymentConfirmation>(
+            "wait-payment-confirmation",
+            new WaitForEventOptions
+            {
+                Event = "stripe/payment.succeeded",
+                Timeout = "1h",
+                Match = "async.data.orderId == event.data.orderId"
+            });
+
+        if (confirmation == null)
+        {
+            // Payment confirmation timed out
+            await ctx.Step.Run("cancel-order", async () =>
+            {
+                await Task.Delay(50);
+                return new { cancelled = true, reason = "Payment confirmation timeout" };
+            });
+
+            return new { status = "cancelled", reason = "Payment timeout" };
+        }
+
+        // Step 5: Send confirmation email
+        await ctx.Step.Run("send-confirmation-email", async () =>
+        {
+            Console.WriteLine($"Sending confirmation email for order {order.orderId}");
+            await Task.Delay(50);
+            return true;
+        });
+
+        return new
+        {
+            status = "completed",
+            orderId = order.orderId,
+            transactionId = payment.transactionId
+        };
+    },
+    options: new FunctionOptions
+    {
+        Retry = new RetryOptions { Attempts = 5 }
+    }
+);
+
+// =============================================================================
+// API Endpoints
+// =============================================================================
+
+// Trigger an event
 app.MapPost("/api/trigger-event", async ([FromBody] EventRequest request) =>
 {
     if (string.IsNullOrEmpty(request.EventName))
@@ -124,27 +193,34 @@ app.MapPost("/api/trigger-event", async ([FromBody] EventRequest request) =>
         return Results.BadRequest("Event name is required");
     }
 
-    // Create and send an event
     var evt = new InngestEvent(request.EventName, request.Data ?? new { });
-    
-    // Optionally add user information
+
     if (request.UserId != null)
     {
         evt.WithUser(new { id = request.UserId });
     }
-    
-    // Send the event
+
     var result = await inngestClient.SendEventAsync(evt);
-    
-    return Results.Ok(new { success = result });
-});
+
+    return Results.Ok(new { success = result, eventId = evt.Id });
+})
+.WithName("TriggerEvent")
+.WithOpenApi();
+
+// Health check
+app.MapGet("/health", () => Results.Ok(new { status = "healthy", timestamp = DateTime.UtcNow }))
+.WithName("HealthCheck")
+.WithOpenApi();
 
 // Route to handle Inngest webhooks
 app.UseInngest("/api/inngest");
 
 app.Run();
 
-// Request model for the trigger endpoint
+// =============================================================================
+// Request/Response Models
+// =============================================================================
+
 public class EventRequest
 {
     public required string EventName { get; set; }
@@ -152,3 +228,10 @@ public class EventRequest
     public string? UserId { get; set; }
 }
 
+public class PaymentConfirmation
+{
+    public string? OrderId { get; set; }
+    public string? TransactionId { get; set; }
+    public decimal Amount { get; set; }
+    public bool Success { get; set; }
+}

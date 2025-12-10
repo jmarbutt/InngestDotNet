@@ -1,9 +1,13 @@
-using System.Text.Json;
+using Inngest.Steps;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Inngest;
 
 /// <summary>
-/// Execution context for Inngest functions providing access to event data, steps, and secrets
+/// Execution context for Inngest functions.
+/// Provides access to the triggering event, step tools for building durable workflows,
+/// and run metadata.
 /// </summary>
 public class InngestContext
 {
@@ -11,192 +15,113 @@ public class InngestContext
     /// The event that triggered this function execution
     /// </summary>
     public InngestEvent Event { get; }
-    
-    /// <summary>
-    /// All events that were part of this function execution request
-    /// </summary>
-    public IEnumerable<InngestEvent> Events { get; }
-    
-    /// <summary>
-    /// Dictionary of completed step results that can be used for step memoization
-    /// </summary>
-    public Dictionary<string, object> Steps { get; }
-    
-    /// <summary>
-    /// Context information about the current function execution
-    /// </summary>
-    public CallRequestContext Ctx { get; }
-    
-    private readonly Dictionary<string, string> _secrets;
-    private readonly IInngestClient? _client;
 
     /// <summary>
-    /// Creates a new InngestContext with the specified parameters
+    /// All events in the batch (for batched triggers).
+    /// For non-batched triggers, this contains just the single triggering event.
     /// </summary>
-    /// <param name="evt">The event that triggered the function</param>
-    /// <param name="events">All events in the request</param>
-    /// <param name="steps">Dictionary of completed step results</param>
-    /// <param name="ctx">Request context information</param>
-    /// <param name="secrets">Secret values accessible to the function</param>
-    /// <param name="client">Reference to the InngestClient for sending events</param>
-    public InngestContext(
+    public IReadOnlyList<InngestEvent> Events { get; }
+
+    /// <summary>
+    /// Step tools for building durable workflows.
+    /// Use this to run code with automatic retries, sleep, wait for events, etc.
+    /// </summary>
+    public IStepTools Step { get; }
+
+    /// <summary>
+    /// Run context containing metadata about the current execution
+    /// </summary>
+    public RunContext Run { get; }
+
+    /// <summary>
+    /// Logger scoped to this function run
+    /// </summary>
+    public ILogger Logger { get; }
+
+    /// <summary>
+    /// Creates a new InngestContext
+    /// </summary>
+    internal InngestContext(
         InngestEvent evt,
         IEnumerable<InngestEvent> events,
-        Dictionary<string, object> steps,
-        CallRequestContext ctx,
-        Dictionary<string, string>? secrets = null,
-        IInngestClient? client = null)
+        IStepTools stepTools,
+        RunContext runContext,
+        ILogger? logger = null)
     {
         Event = evt;
-        Events = events;
-        Steps = steps ?? new Dictionary<string, object>();
-        Ctx = ctx;
-        _secrets = secrets ?? new Dictionary<string, string>();
-        _client = client;
+        Events = events.ToList().AsReadOnly();
+        Step = stepTools;
+        Run = runContext;
+        Logger = logger ?? NullLogger.Instance;
     }
+}
+
+/// <summary>
+/// Strongly-typed execution context for Inngest functions.
+/// Provides typed access to event data.
+/// </summary>
+/// <typeparam name="TEventData">The type of the event data</typeparam>
+public class InngestContext<TEventData> : InngestContext where TEventData : class
+{
+    /// <summary>
+    /// The typed event that triggered this function
+    /// </summary>
+    public new InngestEvent<TEventData> Event { get; }
 
     /// <summary>
-    /// Executes a step with optional retry configuration
+    /// Creates a new typed InngestContext
     /// </summary>
-    /// <typeparam name="T">The return type of the step</typeparam>
-    /// <param name="id">Unique identifier for the step</param>
-    /// <param name="action">The function to execute for this step</param>
-    /// <param name="options">Optional configuration for the step execution</param>
-    /// <returns>The result of the step execution</returns>
-    public async Task<T> Step<T>(string id, Func<Task<T>> action, StepOptions? options = null)
+    internal InngestContext(
+        InngestEvent<TEventData> evt,
+        IEnumerable<InngestEvent> events,
+        IStepTools stepTools,
+        RunContext runContext,
+        ILogger? logger = null)
+        : base(evt, events, stepTools, runContext, logger)
     {
-        // If the step has already been executed, return the result
-        if (Steps.TryGetValue(id, out var stepResult))
-        {
-            if (stepResult is JsonElement jsonElement)
-            {
-                return JsonSerializer.Deserialize<T>(jsonElement.GetRawText()) ?? throw new InvalidOperationException($"Failed to deserialize step result for '{id}'");
-            }
-            return (T)stepResult;
-        }
-
-        // Configure retry logic if specified
-        int retryAttempt = 0;
-        int maxRetries = options?.Retry?.Attempts ?? 0;
-        double retryFactor = options?.Retry?.Factor ?? 2.0;
-        int baseInterval = options?.Retry?.Interval ?? 1000; // milliseconds
-        int maxInterval = options?.Retry?.MaxInterval ?? 30000; // milliseconds
-
-        while (true)
-        {
-            try
-            {
-                var result = await action();
-                Steps[id] = result!;
-                return result;
-            }
-            catch (Exception ex)
-            {
-                if (retryAttempt >= maxRetries)
-                {
-                    throw new StepExecutionException($"Step '{id}' failed after {retryAttempt + 1} attempts", ex);
-                }
-
-                // Calculate backoff time
-                int delayMs = (int)Math.Min(
-                    baseInterval * Math.Pow(retryFactor, retryAttempt),
-                    maxInterval
-                );
-
-                await Task.Delay(delayMs);
-                retryAttempt++;
-            }
-        }
+        Event = evt;
     }
+}
+
+/// <summary>
+/// Context information about the current function run
+/// </summary>
+public class RunContext
+{
+    /// <summary>
+    /// Unique identifier for this run
+    /// </summary>
+    public string RunId { get; init; } = string.Empty;
 
     /// <summary>
-    /// Introduces a delay in the function execution
+    /// The function ID being executed
     /// </summary>
-    /// <param name="id">Unique identifier for the sleep step</param>
-    /// <param name="duration">The duration to sleep</param>
-    /// <returns>A task representing the asynchronous operation</returns>
-    public async Task Sleep(string id, TimeSpan duration)
-    {
-        // According to SDK spec, Sleep steps need to be reported to Inngest server with a 206 Partial Content
-        // Check if this step has been memoized already
-        if (Steps.TryGetValue(id, out var stepResult))
-        {
-            // If already memoized, it means Inngest has decided the sleep is done
-            return;
-        }
-        
-        // If executing locally and not in a distributed environment
-        if (Ctx.DisableImmediateExecution == false && _client == null)
-        {
-            // Perform local sleep
-            await Task.Delay(duration);
-            return;
-        }
-        
-        // Otherwise, this step needs to be reported to Inngest to schedule a sleep
-        // This is just a stub - the actual SDK implementation would need to return a 206 response here
-        // with the Sleep operation according to the spec
-        throw new NotImplementedException("Sleep step reporting to Inngest server is not implemented yet");
-    }
-    
-    /// <summary>
-    /// Introduces a delay in the function execution with a specified number of seconds
-    /// </summary>
-    /// <param name="id">Unique identifier for the sleep step</param>
-    /// <param name="seconds">The number of seconds to sleep</param>
-    /// <returns>A task representing the asynchronous operation</returns>
-    public Task Sleep(string id, int seconds)
-    {
-        return Sleep(id, TimeSpan.FromSeconds(seconds));
-    }
+    public string FunctionId { get; init; } = string.Empty;
 
     /// <summary>
-    /// Retrieves a secret value by key
+    /// The current attempt number (0 for first attempt)
     /// </summary>
-    /// <param name="key">The key of the secret to retrieve</param>
-    /// <returns>The secret value</returns>
-    /// <exception cref="KeyNotFoundException">Thrown when the specified key is not found</exception>
-    public string GetSecret(string key)
-    {
-        if (_secrets.TryGetValue(key, out var value))
-        {
-            return value;
-        }
-        
-        throw new KeyNotFoundException($"Secret '{key}' not found");
-    }
+    public int Attempt { get; init; }
 
     /// <summary>
-    /// Sends an event to Inngest
+    /// Whether this is a replay (re-execution with memoized state)
     /// </summary>
-    /// <param name="eventName">The name of the event</param>
-    /// <param name="data">The data payload for the event</param>
-    /// <returns>True if the event was sent successfully, otherwise false</returns>
-    /// <exception cref="InvalidOperationException">Thrown when the client is not available</exception>
-    public async Task<bool> SendEvent(string eventName, object data)
-    {
-        if (_client == null)
-        {
-            throw new InvalidOperationException("InngestClient not available in this context");
-        }
-        
-        return await _client.SendEventAsync(eventName, data);
-    }
-    
+    public bool IsReplay { get; init; }
+}
+
+/// <summary>
+/// Typed event with strongly-typed data property
+/// </summary>
+/// <typeparam name="TData">The type of the event data</typeparam>
+public class InngestEvent<TData> : InngestEvent where TData : class
+{
     /// <summary>
-    /// Sends a pre-configured event to Inngest
+    /// The strongly-typed event data
     /// </summary>
-    /// <param name="evt">The event to send</param>
-    /// <returns>True if the event was sent successfully, otherwise false</returns>
-    /// <exception cref="InvalidOperationException">Thrown when the client is not available</exception>
-    public async Task<bool> SendEvent(InngestEvent evt)
+    public new TData? Data
     {
-        if (_client == null)
-        {
-            throw new InvalidOperationException("InngestClient not available in this context");
-        }
-        
-        return await _client.SendEventAsync(evt);
+        get => base.Data as TData;
+        set => base.Data = value;
     }
 }
 
@@ -209,7 +134,7 @@ public class StepOptions
     /// Optional display name for the step
     /// </summary>
     public string? Name { get; set; }
-    
+
     /// <summary>
     /// Retry configuration for the step
     /// </summary>
@@ -217,7 +142,8 @@ public class StepOptions
 }
 
 /// <summary>
-/// Exception thrown when a step execution fails
+/// Exception thrown when a step execution fails after exhausting retries.
+/// This is kept for backwards compatibility.
 /// </summary>
 public class StepExecutionException : Exception
 {
@@ -225,42 +151,34 @@ public class StepExecutionException : Exception
     /// Gets whether this exception should not be retried
     /// </summary>
     public bool NoRetry { get; }
-    
+
     /// <summary>
     /// Gets the amount of time to wait before retrying
     /// </summary>
     public TimeSpan? RetryAfter { get; }
-    
+
     /// <summary>
-    /// Creates a new StepExecutionException with the specified message and inner exception
+    /// Creates a new StepExecutionException
     /// </summary>
-    /// <param name="message">The error message</param>
-    /// <param name="innerException">The inner exception that caused this exception</param>
-    /// <param name="noRetry">Whether this error should not be retried</param>
-    public StepExecutionException(string message, Exception innerException, bool noRetry = false) 
+    public StepExecutionException(string message, Exception innerException, bool noRetry = false)
         : base(message, innerException)
     {
         NoRetry = noRetry;
     }
-    
+
     /// <summary>
-    /// Creates a new StepExecutionException with the specified message and inner exception
+    /// Creates a new StepExecutionException with retry delay
     /// </summary>
-    /// <param name="message">The error message</param>
-    /// <param name="innerException">The inner exception that caused this exception</param>
-    /// <param name="retryAfter">How long to wait before retrying</param>
-    public StepExecutionException(string message, Exception innerException, TimeSpan retryAfter) 
+    public StepExecutionException(string message, Exception innerException, TimeSpan retryAfter)
         : base(message, innerException)
     {
         RetryAfter = retryAfter;
     }
-    
+
     /// <summary>
-    /// Creates a new StepExecutionException with the specified message
+    /// Creates a new StepExecutionException
     /// </summary>
-    /// <param name="message">The error message</param>
-    /// <param name="noRetry">Whether this error should not be retried</param>
-    public StepExecutionException(string message, bool noRetry = false) 
+    public StepExecutionException(string message, bool noRetry = false)
         : base(message)
     {
         NoRetry = noRetry;

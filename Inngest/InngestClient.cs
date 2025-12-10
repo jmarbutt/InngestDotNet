@@ -1,7 +1,11 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Inngest.Exceptions;
+using Inngest.Steps;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Inngest;
 
@@ -21,8 +25,9 @@ public class InngestClient : IInngestClient
     private readonly Dictionary<string, string> _secrets = new();
     private readonly string _environment;
     private readonly bool _isDev;
-    private readonly string _sdkVersion = "0.1.0";
-    private readonly string _appId = "inngest-dotnet";
+    private readonly string _sdkVersion = "0.2.0";
+    private readonly string _appId;
+    private readonly ILogger _logger;
 
     /// <summary>
     /// Initialize a new Inngest client
@@ -32,12 +37,16 @@ public class InngestClient : IInngestClient
     /// <param name="apiOrigin">Custom API origin (defaults to environment or Inngest Cloud)</param>
     /// <param name="eventApiOrigin">Custom event API origin (defaults to environment or Inngest Cloud)</param>
     /// <param name="httpClient">Optional custom HttpClient</param>
+    /// <param name="appId">Application ID for identifying this app in Inngest (defaults to "inngest-dotnet")</param>
+    /// <param name="logger">Optional logger for diagnostics</param>
     public InngestClient(
         string? eventKey = null,
         string? signingKey = null,
         string? apiOrigin = null,
         string? eventApiOrigin = null,
-        HttpClient? httpClient = null)
+        HttpClient? httpClient = null,
+        string? appId = null,
+        ILogger? logger = null)
     {
         // Check environment variables according to SDK spec
         _eventKey = eventKey ?? Environment.GetEnvironmentVariable("INNGEST_EVENT_KEY") ?? "";
@@ -45,7 +54,9 @@ public class InngestClient : IInngestClient
         _signingKeyFallback = Environment.GetEnvironmentVariable("INNGEST_SIGNING_KEY_FALLBACK");
         _environment = Environment.GetEnvironmentVariable("INNGEST_ENV") ?? "dev";
         _isDev = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("INNGEST_DEV"));
-        
+        _appId = appId ?? Environment.GetEnvironmentVariable("INNGEST_APP_ID") ?? "inngest-dotnet";
+        _logger = logger ?? NullLogger.Instance;
+
         // Set API endpoints based on dev mode and environment variables
         string devServerUrl = Environment.GetEnvironmentVariable("INNGEST_DEV") ?? "http://localhost:8288";
         if (!Uri.TryCreate(devServerUrl, UriKind.Absolute, out _))
@@ -53,16 +64,16 @@ public class InngestClient : IInngestClient
             devServerUrl = "http://localhost:8288";
         }
 
-        _apiOrigin = apiOrigin ?? 
+        _apiOrigin = apiOrigin ??
                      Environment.GetEnvironmentVariable("INNGEST_API_BASE_URL") ??
                      (_isDev ? devServerUrl : "https://api.inngest.com");
-        
-        _eventApiOrigin = eventApiOrigin ?? 
-                          Environment.GetEnvironmentVariable("INNGEST_EVENT_API_BASE_URL") ?? 
+
+        _eventApiOrigin = eventApiOrigin ??
+                          Environment.GetEnvironmentVariable("INNGEST_EVENT_API_BASE_URL") ??
                           (_isDev ? devServerUrl : "https://inn.gs");
-        
+
         _httpClient = httpClient ?? new HttpClient();
-        
+
         _jsonOptions = new JsonSerializerOptions
         {
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -329,7 +340,7 @@ public class InngestClient : IInngestClient
 
         // Build up the list of functions to register
         var fnArray = new List<object>();
-        
+
         foreach (var fn in _functions.Values)
         {
             var triggers = new List<object>();
@@ -344,43 +355,186 @@ public class InngestClient : IInngestClient
                 else
                 {
                     // Handle event triggers
-                    var triggerObj = new Dictionary<string, string>();
+                    var triggerObj = new Dictionary<string, object>();
                     triggerObj["event"] = trigger.Event;
-                    
+
                     if (trigger.Constraint?.Expression != null)
                     {
                         triggerObj["expression"] = trigger.Constraint.Expression;
                     }
-                    
+
                     triggers.Add(triggerObj);
                 }
             }
-            
-            var retries = fn.Options?.Retry != null 
-                ? new { attempts = fn.Options.Retry.Attempts ?? 4 } 
-                : null;
-                
-            var functionObj = new
+
+            // Build step definitions - use registered steps if any, otherwise default single step
+            var stepsDict = new Dictionary<string, object>();
+            if (fn.Steps.Count > 0)
             {
-                id = $"{_appId}-{fn.Id}", // Composite ID
-                name = fn.Name,
-                triggers = triggers,
-                steps = new
+                foreach (var step in fn.Steps)
                 {
-                    step = new
+                    var stepObj = new Dictionary<string, object>
                     {
-                        id = "step",
-                        name = "step",
-                        runtime = new
+                        ["id"] = step.Id,
+                        ["name"] = step.Name ?? step.Id,
+                        ["runtime"] = new
                         {
                             type = "http",
-                            url = $"{url.TrimEnd('/')}?stepId=step&fnId={fn.Id}" // Use the base URL from the request path or INNGEST_SERVE_PATH
-                        },
-                        retries = retries
+                            url = $"{url.TrimEnd('/')}?stepId={step.Id}&fnId={fn.Id}"
+                        }
+                    };
+
+                    if (step.RetryOptions != null)
+                    {
+                        stepObj["retries"] = BuildRetryConfig(step.RetryOptions);
                     }
+
+                    stepsDict[step.Id] = stepObj;
                 }
+            }
+            else
+            {
+                // Default single step for functions without explicit step definitions
+                var defaultStep = new Dictionary<string, object>
+                {
+                    ["id"] = "step",
+                    ["name"] = "step",
+                    ["runtime"] = new
+                    {
+                        type = "http",
+                        url = $"{url.TrimEnd('/')}?stepId=step&fnId={fn.Id}"
+                    }
+                };
+
+                if (fn.Options?.Retry != null)
+                {
+                    defaultStep["retries"] = BuildRetryConfig(fn.Options.Retry);
+                }
+
+                stepsDict["step"] = defaultStep;
+            }
+
+            // Build the function object with all configuration options
+            var functionObj = new Dictionary<string, object>
+            {
+                ["id"] = $"{_appId}-{fn.Id}",
+                ["name"] = fn.Name,
+                ["triggers"] = triggers,
+                ["steps"] = stepsDict
             };
-            
+
+            // Add optional configuration
+            if (fn.Options != null)
+            {
+                // Concurrency
+                if (fn.Options.ConcurrencyOptions != null)
+                {
+                    var concurrency = new Dictionary<string, object>
+                    {
+                        ["limit"] = fn.Options.ConcurrencyOptions.Limit
+                    };
+                    if (fn.Options.ConcurrencyOptions.Key != null)
+                        concurrency["key"] = fn.Options.ConcurrencyOptions.Key;
+                    if (fn.Options.ConcurrencyOptions.Scope != null)
+                        concurrency["scope"] = fn.Options.ConcurrencyOptions.Scope;
+                    functionObj["concurrency"] = new[] { concurrency };
+                }
+                else if (fn.Options.Concurrency.HasValue)
+                {
+                    functionObj["concurrency"] = new[] { new { limit = fn.Options.Concurrency.Value } };
+                }
+
+                // Rate limit
+                if (fn.Options.RateLimit != null)
+                {
+                    var rateLimit = new Dictionary<string, object>
+                    {
+                        ["limit"] = fn.Options.RateLimit.Limit,
+                        ["period"] = fn.Options.RateLimit.Period
+                    };
+                    if (fn.Options.RateLimit.Key != null)
+                        rateLimit["key"] = fn.Options.RateLimit.Key;
+                    functionObj["rateLimit"] = rateLimit;
+                }
+
+                // Throttle
+                if (fn.Options.Throttle != null)
+                {
+                    var throttle = new Dictionary<string, object>
+                    {
+                        ["limit"] = fn.Options.Throttle.Limit,
+                        ["period"] = fn.Options.Throttle.Period
+                    };
+                    if (fn.Options.Throttle.Key != null)
+                        throttle["key"] = fn.Options.Throttle.Key;
+                    if (fn.Options.Throttle.Burst.HasValue)
+                        throttle["burst"] = fn.Options.Throttle.Burst.Value;
+                    functionObj["throttle"] = throttle;
+                }
+
+                // Debounce
+                if (fn.Options.Debounce != null)
+                {
+                    var debounce = new Dictionary<string, object>
+                    {
+                        ["period"] = fn.Options.Debounce.Period
+                    };
+                    if (fn.Options.Debounce.Key != null)
+                        debounce["key"] = fn.Options.Debounce.Key;
+                    if (fn.Options.Debounce.Timeout != null)
+                        debounce["timeout"] = fn.Options.Debounce.Timeout;
+                    functionObj["debounce"] = debounce;
+                }
+
+                // Batch (event batching)
+                if (fn.Options.Batch != null)
+                {
+                    var batchEvents = new Dictionary<string, object>
+                    {
+                        ["maxSize"] = fn.Options.Batch.MaxSize
+                    };
+                    if (fn.Options.Batch.Timeout != null)
+                        batchEvents["timeout"] = fn.Options.Batch.Timeout;
+                    if (fn.Options.Batch.Key != null)
+                        batchEvents["key"] = fn.Options.Batch.Key;
+                    functionObj["batchEvents"] = batchEvents;
+                }
+
+                // Priority
+                if (fn.Options.Priority.HasValue)
+                {
+                    functionObj["priority"] = new { run = fn.Options.Priority.Value };
+                }
+
+                // Cancellation
+                if (fn.Options.Cancellation != null)
+                {
+                    var cancel = new Dictionary<string, object>
+                    {
+                        ["event"] = fn.Options.Cancellation.Event
+                    };
+                    if (fn.Options.Cancellation.Match != null)
+                        cancel["match"] = fn.Options.Cancellation.Match;
+                    if (fn.Options.Cancellation.If != null)
+                        cancel["if"] = fn.Options.Cancellation.If;
+                    if (fn.Options.Cancellation.Timeout != null)
+                        cancel["timeout"] = fn.Options.Cancellation.Timeout;
+                    functionObj["cancel"] = new[] { cancel };
+                }
+
+                // Idempotency
+                if (fn.Options.IdempotencyKey != null)
+                {
+                    functionObj["idempotency"] = fn.Options.IdempotencyKey;
+                }
+
+                // Retries at function level
+                if (fn.Options.Retry != null)
+                {
+                    functionObj["retries"] = BuildRetryConfig(fn.Options.Retry);
+                }
+            }
+
             fnArray.Add(functionObj);
         }
 
@@ -562,29 +716,26 @@ public class InngestClient : IInngestClient
 
     private async Task HandleCallRequest(HttpContext context)
     {
-        try 
-        {
-            var request = context.Request;
-            var response = context.Response;
-            string? functionId = null;
-            string? stepId = null;
+        var request = context.Request;
+        var response = context.Response;
 
-            // Extract fnId and stepId from query parameters
+        try
+        {
+            // Extract fnId from query parameters
+            string? functionId = null;
             if (request.Query.TryGetValue("fnId", out var fnIdValues))
             {
                 functionId = fnIdValues.FirstOrDefault();
             }
 
-            if (request.Query.TryGetValue("stepId", out var stepIdValues))
-            {
-                stepId = stepIdValues.FirstOrDefault();
-            }
-
             // Parse request body as CallRequestPayload
             request.EnableBuffering();
-            var str = await new StreamReader(request.Body, leaveOpen: true).ReadToEndAsync();
-            request.Body.Position = 0; // Reset position so we can read it again
-            var payload = await request.ReadFromJsonAsync<CallRequestPayload>(_jsonOptions);
+            await using var bodyStream = new MemoryStream();
+            await request.Body.CopyToAsync(bodyStream);
+            bodyStream.Position = 0;
+            request.Body.Position = 0;
+
+            var payload = await JsonSerializer.DeserializeAsync<CallRequestPayload>(bodyStream, _jsonOptions);
             if (payload == null || payload.Event == null)
             {
                 response.StatusCode = StatusCodes.Status400BadRequest;
@@ -595,20 +746,14 @@ public class InngestClient : IInngestClient
             // Get the first event
             var firstEvent = payload.Event;
 
-            // Extract function ID from the first event's data._inngest.fn_id
-            string? fnId = null;
-            if (firstEvent.Data is JsonElement dataElement &&
+            // Extract function ID from query parameter or event data
+            string? fnId = functionId;
+            if (string.IsNullOrEmpty(fnId) && firstEvent.Data is JsonElement dataElement &&
                 dataElement.TryGetProperty("_inngest", out var inngestElement) &&
                 inngestElement.TryGetProperty("fn_id", out var fnIdElement) &&
                 fnIdElement.ValueKind == JsonValueKind.String)
             {
                 fnId = fnIdElement.GetString();
-            }
-
-            // Override function ID from query parameter if provided
-            if (!string.IsNullOrEmpty(functionId))
-            {
-                fnId = functionId;
             }
 
             // Validate function ID
@@ -619,139 +764,113 @@ public class InngestClient : IInngestClient
                 return;
             }
 
-            string runId = firstEvent.Id ?? Guid.NewGuid().ToString();
-
-            // Ensure the payload has all required fields
-            if (payload.Steps == null)
-            {
-                payload.Steps = new Dictionary<string, object>();
-            }
-            
-            if (payload.Events == null)
-            {
-                payload.Events = new List<InngestEvent> { firstEvent };
-            }
-            
-            if (payload.Ctx == null)
-            {
-                payload.Ctx = new CallRequestContext
-                {
-                    FunctionId = fnId,
-                    RunId = runId,
-                    UseApi = false
-                };
-            }
-            
-            if (payload.Secrets == null)
-            {
-                payload.Secrets = new Dictionary<string, string>(_secrets ?? new Dictionary<string, string>());
-            }
-            
             // Extract app-specific function ID (strip off the app prefix if present)
             string actualFunctionId = fnId;
-            if (actualFunctionId != null && actualFunctionId.StartsWith($"{_appId}-"))
+            if (actualFunctionId.StartsWith($"{_appId}-"))
             {
                 actualFunctionId = actualFunctionId.Substring(_appId.Length + 1);
             }
 
-            // Ensure actualFunctionId is not null to prevent errors
-            if (string.IsNullOrEmpty(actualFunctionId))
-            {
-                response.StatusCode = StatusCodes.Status400BadRequest;
-                await response.WriteAsJsonAsync(new { error = "Invalid function ID" }, _jsonOptions);
-                return;
-            }
-            
-            var inngestContext = new InngestContext(
-                payload.Event, 
-                payload.Events, 
-                payload.Steps,
-                new CallRequestContext
-                {
-                    // Copy all properties from payload.Ctx, but override FunctionId
-                    RunId = payload.Ctx?.RunId ?? Guid.NewGuid().ToString(),
-                    FunctionId = actualFunctionId,
-                    UseApi = payload.Ctx?.UseApi ?? false,
-                    // Add any other properties that CallRequestContext has
-                },
-                payload.Secrets ?? _secrets ?? new Dictionary<string, string>(),
-                this);
-
-            if (_functions.TryGetValue(actualFunctionId, out var function))
-            {
-                try
-                {
-                    // If a specific step is requested, find and execute just that step
-                    if (!string.IsNullOrEmpty(stepId) && stepId != "step")
-                    {
-                        // This is a specific step execution request
-                        // In the future, implement step retrieval and execution based on stepId
-                        
-                        // For now, let's return 501 Not Implemented as step-specific execution is not yet supported
-                        response.StatusCode = StatusCodes.Status501NotImplemented;
-                        await response.WriteAsJsonAsync(new { 
-                            error = "Step-specific execution is not yet implemented",
-                            id = stepId,
-                            op = "StepNotFound"
-                        }, _jsonOptions);
-                        return;
-                    }
-                    
-                    // Otherwise execute the entire function
-                    var result = await function.Handler(inngestContext);
-                    
-                    // Standard successful response with 200 OK
-                    response.Headers["X-Inngest-Req-Version"] = "1";
-                    await response.WriteAsJsonAsync(result, _jsonOptions);
-                }
-                catch (Exception ex)
-                {
-                    var errorResponse = new 
-                    {
-                        name = ex.GetType().Name,
-                        message = ex.Message,
-                        stack = ex.StackTrace
-                    };
-                    
-                    // Determine if this is a retriable error
-                    bool noRetry = ex is StepExecutionException && ((StepExecutionException)ex).NoRetry;
-                    
-                    if (noRetry)
-                    {
-                        response.StatusCode = StatusCodes.Status400BadRequest;
-                        response.Headers["X-Inngest-No-Retry"] = "true";
-                    }
-                    else
-                    {
-                        response.StatusCode = StatusCodes.Status500InternalServerError;
-                        response.Headers["X-Inngest-No-Retry"] = "false";
-                        
-                        // If retry delay was specified, include Retry-After header
-                        if (ex is StepExecutionException retryEx && retryEx.RetryAfter.HasValue)
-                        {
-                            response.Headers["Retry-After"] = retryEx.RetryAfter.Value.TotalSeconds.ToString();
-                        }
-                    }
-                    
-                    await response.WriteAsJsonAsync(errorResponse, _jsonOptions);
-                }
-            }
-            else
+            // Find the function
+            if (!_functions.TryGetValue(actualFunctionId, out var function))
             {
                 response.StatusCode = StatusCodes.Status404NotFound;
                 await response.WriteAsJsonAsync(new { error = $"Function '{actualFunctionId}' not found" }, _jsonOptions);
+                return;
+            }
+
+            // Ensure the payload has all required fields
+            payload.Steps ??= new Dictionary<string, object>();
+            payload.Events ??= new List<InngestEvent> { firstEvent };
+
+            string runId = payload.Ctx?.RunId ?? firstEvent.Id ?? Guid.NewGuid().ToString();
+            int attempt = payload.Ctx?.Attempt ?? 0;
+
+            // Create step tools with memoized state from Inngest
+            var stepTools = new StepTools(payload.Steps, _jsonOptions);
+
+            // Create the execution context
+            var inngestContext = new InngestContext(
+                firstEvent,
+                payload.Events,
+                stepTools,
+                new RunContext
+                {
+                    RunId = runId,
+                    FunctionId = actualFunctionId,
+                    Attempt = attempt,
+                    IsReplay = payload.Steps.Count > 0
+                },
+                _logger);
+
+            _logger.LogDebug("Executing function {FunctionId} (run: {RunId}, attempt: {Attempt}, memoized steps: {StepCount})",
+                actualFunctionId, runId, attempt, payload.Steps.Count);
+
+            try
+            {
+                // Execute the function
+                var result = await function.Handler(inngestContext);
+
+                // Function completed successfully - return 200 with result
+                _logger.LogDebug("Function {FunctionId} completed successfully", actualFunctionId);
+                response.StatusCode = StatusCodes.Status200OK;
+                await response.WriteAsJsonAsync(result, _jsonOptions);
+            }
+            catch (StepInterruptException stepEx)
+            {
+                // Steps need to be scheduled - return 206 with operations
+                _logger.LogDebug("Function {FunctionId} requires step scheduling: {StepCount} operation(s)",
+                    actualFunctionId, stepEx.Operations.Count);
+
+                response.StatusCode = 206; // Partial Content
+                await response.WriteAsJsonAsync(stepEx.Operations, _jsonOptions);
+            }
+            catch (NonRetriableException ex)
+            {
+                // Non-retriable error - return 400 with no-retry header
+                _logger.LogWarning(ex, "Function {FunctionId} failed with non-retriable error", actualFunctionId);
+
+                response.StatusCode = StatusCodes.Status400BadRequest;
+                response.Headers["X-Inngest-No-Retry"] = "true";
+                await WriteErrorResponse(response, ex);
+            }
+            catch (RetryAfterException ex)
+            {
+                // Retriable error with specific delay
+                _logger.LogWarning(ex, "Function {FunctionId} failed, retry after {RetryAfter}", actualFunctionId, ex.RetryAfter);
+
+                response.StatusCode = StatusCodes.Status500InternalServerError;
+                response.Headers["X-Inngest-No-Retry"] = "false";
+                response.Headers["Retry-After"] = ((int)ex.RetryAfter.TotalSeconds).ToString();
+                await WriteErrorResponse(response, ex);
+            }
+            catch (Exception ex)
+            {
+                // Retriable error
+                _logger.LogError(ex, "Function {FunctionId} failed with retriable error", actualFunctionId);
+
+                response.StatusCode = StatusCodes.Status500InternalServerError;
+                response.Headers["X-Inngest-No-Retry"] = "false";
+                await WriteErrorResponse(response, ex);
             }
         }
         catch (Exception ex)
         {
-            context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-            await context.Response.WriteAsJsonAsync(new 
-            { 
-                name = ex.GetType().Name,
-                message = ex.Message,
-                stack = ex.StackTrace
-            }, _jsonOptions);
+            _logger.LogError(ex, "Failed to handle call request");
+            response.StatusCode = StatusCodes.Status500InternalServerError;
+            await WriteErrorResponse(response, ex);
         }
+    }
+
+    private async Task WriteErrorResponse(HttpResponse response, Exception ex)
+    {
+        var errorResponse = new
+        {
+            name = ex.GetType().Name,
+            message = ex.Message,
+            stack = ex.StackTrace
+        };
+        await response.WriteAsJsonAsync(errorResponse, _jsonOptions);
     }
 
     private async Task HandleIntrospectionRequest(HttpContext context)
@@ -827,5 +946,28 @@ public class InngestClient : IInngestClient
         }
 
         await response.WriteAsJsonAsync(responseObj, _jsonOptions);
+    }
+
+    /// <summary>
+    /// Builds a retry configuration object for the sync payload
+    /// </summary>
+    private static object BuildRetryConfig(RetryOptions retry)
+    {
+        var config = new Dictionary<string, object>();
+
+        if (retry.Attempts.HasValue)
+            config["attempts"] = retry.Attempts.Value;
+
+        // Convert millisecond intervals to Inngest time strings if present
+        if (retry.Interval.HasValue)
+            config["minDelay"] = $"{retry.Interval.Value}ms";
+
+        if (retry.MaxInterval.HasValue)
+            config["maxDelay"] = $"{retry.MaxInterval.Value}ms";
+
+        if (retry.Factor.HasValue)
+            config["factor"] = retry.Factor.Value;
+
+        return config;
     }
 }

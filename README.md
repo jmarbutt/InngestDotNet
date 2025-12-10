@@ -1,6 +1,13 @@
 # Inngest.NET
 
-A .NET SDK for [Inngest](https://www.inngest.com/), a platform for building reliable, scalable event-driven architectures.
+A .NET SDK for [Inngest](https://www.inngest.com/), a platform for building reliable, scalable event-driven workflows.
+
+## Features
+
+- **Durable execution**: Steps automatically retry and resume from failures
+- **Step primitives**: Run, Sleep, SleepUntil, WaitForEvent, Invoke, SendEvent
+- **Flow control**: Concurrency, rate limiting, throttling, debounce, batching
+- **Full observability**: Built-in logging and tracing support
 
 ## Installation
 
@@ -13,32 +20,48 @@ dotnet add package Inngest.NET
 ```csharp
 using Inngest;
 
-// Configure in Program.cs
 var builder = WebApplication.CreateBuilder(args);
 
-// Add Inngest
-builder.Services.AddInngest(
-    eventKey: "your-event-key", 
-    signingKey: "your-signing-key"
-);
+// Add Inngest with DI
+builder.Services.AddInngest(options =>
+{
+    options.AppId = "my-app";
+    // Keys can also be set via INNGEST_EVENT_KEY and INNGEST_SIGNING_KEY env vars
+});
 
 var app = builder.Build();
 
-// Get the client from DI
-var inngestClient = app.Services.GetRequiredService<IInngestClient>();
+var inngest = app.Services.GetRequiredService<IInngestClient>();
 
 // Create a function that responds to events
-inngestClient.CreateFunction("hello-world-handler", async (context) =>
-{
-    var result = await context.Step("process", async () =>
+inngest.CreateFunction(
+    id: "process-order",
+    name: "Process Order",
+    triggers: new[] { FunctionTrigger.CreateEventTrigger("shop/order.created") },
+    handler: async (ctx) =>
     {
-        var eventData = context.Event.Data;
-        // Your business logic here
-        return new { message = "Hello from Inngest.NET!" };
+        // Steps are durable - they retry on failure and skip on replay
+        var validated = await ctx.Step.Run("validate-order", async () =>
+        {
+            // Your business logic here
+            return new { orderId = ctx.Event.Data.GetProperty("orderId").GetString() };
+        });
+
+        // Sleep for 5 minutes (durable - survives restarts)
+        await ctx.Step.Sleep("wait-for-processing", TimeSpan.FromMinutes(5));
+
+        // Wait for a payment confirmation event
+        var payment = await ctx.Step.WaitForEvent<PaymentConfirmation>(
+            "wait-for-payment",
+            new WaitForEventOptions
+            {
+                Event = "stripe/payment.succeeded",
+                Timeout = "1h",
+                Match = "async.data.orderId == event.data.orderId"
+            });
+
+        return new { status = "completed", orderId = validated.orderId };
     });
-    
-    return result;
-});
 
 // Set up endpoint for Inngest to call your functions
 app.UseInngest("/api/inngest");
@@ -48,205 +71,290 @@ app.Run();
 
 ## Environment Variables
 
-The SDK supports the following environment variables as specified by the Inngest SDK specification:
-
-### Critical Variables
-
-- `INNGEST_EVENT_KEY` - Your Inngest event key for sending events
-- `INNGEST_SIGNING_KEY` - Your Inngest signing key for authentication
-- `INNGEST_SIGNING_KEY_FALLBACK` - Optional fallback signing key
-- `INNGEST_ENV` - The environment name to use when sending events
-
-### Optional Variables
-
-- `INNGEST_DEV` - Set to any non-empty value to use the Inngest Dev Server (or provide a URL like `http://localhost:8288`)
-- `INNGEST_API_BASE_URL` - Override the Inngest API URL
-- `INNGEST_EVENT_API_BASE_URL` - Override the Inngest Event API URL
-- `INNGEST_SERVE_ORIGIN` - The origin (base URL) for your application that Inngest will call
-- `INNGEST_SERVE_PATH` - The path for the Inngest endpoint in your application
-
-When instantiating the client directly, you can omit parameters and they'll be read from environment variables:
-
-```csharp
-// This will use environment variables for configuration
-var inngestClient = new InngestClient();
-```
+| Variable | Description |
+|----------|-------------|
+| `INNGEST_EVENT_KEY` | Your Inngest event key for sending events |
+| `INNGEST_SIGNING_KEY` | Your Inngest signing key for authentication |
+| `INNGEST_SIGNING_KEY_FALLBACK` | Optional fallback signing key |
+| `INNGEST_ENV` | Environment name (e.g., "production", "staging") |
+| `INNGEST_DEV` | Set to any value or URL to use Inngest Dev Server |
+| `INNGEST_SERVE_ORIGIN` | Base URL for your application |
+| `INNGEST_SERVE_PATH` | Path for the Inngest endpoint |
 
 ## Sending Events
 
 ```csharp
-// Simple event with data
-await inngestClient.SendEventAsync("user.signed_up", new { 
-    id = 123,
-    email = "user@example.com" 
+// Simple event
+await inngest.SendEventAsync("user.signed_up", new {
+    userId = "usr_123",
+    email = "user@example.com"
 });
 
-// Custom event with user data and idempotency key
-var evt = new InngestEvent("user.signed_up", new { 
-    id = 123, 
-    email = "user@example.com" 
-})
-.WithUser(new { id = "usr_123" })
-.WithIdempotencyKey("unique-key-123");
+// Event with metadata
+var evt = new InngestEvent("user.signed_up", new { userId = "usr_123" })
+    .WithUser(new { id = "usr_123" })
+    .WithIdempotencyKey("signup-usr_123");
 
-await inngestClient.SendEventAsync(evt);
+await inngest.SendEventAsync(evt);
 
-// Send multiple events in one request
-var events = new List<InngestEvent> { 
-    new InngestEvent("event.one", new { id = 1 }),
-    new InngestEvent("event.two", new { id = 2 })
-};
-
-await inngestClient.SendEventsAsync(events);
+// Batch events
+await inngest.SendEventsAsync(new[] {
+    new InngestEvent("order.created", new { orderId = "ord_1" }),
+    new InngestEvent("order.created", new { orderId = "ord_2" })
+});
 ```
 
-## Creating Functions
+## Step Primitives
 
-### Basic Function
+### step.Run - Execute code with automatic retry
 
 ```csharp
-inngestClient.CreateFunction("function-id", async (context) =>
+var result = await ctx.Step.Run("fetch-user", async () =>
 {
-    var result = await context.Step("step-id", async () =>
-    {
-        // Your business logic
-        return new { success = true };
-    });
-    
-    return result;
+    var user = await userService.GetUserAsync(userId);
+    return user;
 });
+
+// Synchronous version
+var value = await ctx.Step.Run("compute", () => ComputeValue());
 ```
 
-### Advanced Function Configuration
+### step.Sleep - Pause execution
 
 ```csharp
-// Event trigger
-var eventTrigger = FunctionTrigger.CreateEventTrigger("user.created");
+// Sleep for a duration
+await ctx.Step.Sleep("wait", TimeSpan.FromHours(1));
 
-// Cron trigger (runs every hour)
-var cronTrigger = FunctionTrigger.CreateCronTrigger("0 * * * *");
+// Sleep using Inngest time string format
+await ctx.Step.Sleep("wait", "30m");  // 30 minutes
+await ctx.Step.Sleep("wait", "2h30m"); // 2.5 hours
+```
 
-// Function with options
-inngestClient.CreateFunction(
-    id: "advanced-function",
-    name: "Advanced Function Example",
-    triggers: new[] { eventTrigger, cronTrigger },
-    handler: async (context) =>
+### step.SleepUntil - Sleep until a specific time
+
+```csharp
+var targetTime = DateTimeOffset.UtcNow.AddDays(1);
+await ctx.Step.SleepUntil("wait-until-tomorrow", targetTime);
+```
+
+### step.WaitForEvent - Wait for another event
+
+```csharp
+var payment = await ctx.Step.WaitForEvent<PaymentData>(
+    "wait-payment",
+    new WaitForEventOptions
     {
-        // Your function code
-        return new { status = "complete" };
-    },
+        Event = "payment/completed",
+        Timeout = "24h",
+        Match = "async.data.orderId == event.data.orderId"
+    });
+
+if (payment == null)
+{
+    // Timeout occurred
+    await ctx.Step.Run("handle-timeout", () => CancelOrder());
+}
+```
+
+### step.Invoke - Call another Inngest function
+
+```csharp
+var result = await ctx.Step.Invoke<ProcessResult>(
+    "process-payment",
+    new InvokeOptions
+    {
+        FunctionId = "my-app-payment-processor",
+        Data = new { amount = 100, currency = "USD" },
+        Timeout = "5m"
+    });
+```
+
+### step.SendEvent - Emit events from within a function
+
+```csharp
+await ctx.Step.SendEvent("notify-team", new InngestEvent(
+    "notification/send",
+    new { message = "Order completed!", channel = "slack" }
+));
+```
+
+## Function Configuration
+
+### Concurrency
+
+```csharp
+inngest.CreateFunction(
+    id: "limited-function",
+    triggers: new[] { FunctionTrigger.CreateEventTrigger("task/created") },
+    handler: async (ctx) => { /* ... */ },
     options: new FunctionOptions
     {
-        Concurrency = 10,
-        Retry = new RetryOptions
+        // Simple concurrency limit
+        Concurrency = 5,
+
+        // Or advanced with key-based limits
+        ConcurrencyOptions = new ConcurrencyOptions
         {
-            Attempts = 3,
-            Interval = 1000,  // ms
-            Factor = 2.0      // exponential backoff
+            Limit = 1,
+            Key = "event.data.userId",  // One concurrent execution per user
+            Scope = "fn"  // "fn" or "env"
         }
-    }
-);
+    });
 ```
 
-## Steps with Retry
+### Rate Limiting
 
 ```csharp
-// Configure retry for a step
-var stepOptions = new StepOptions
+options: new FunctionOptions
+{
+    RateLimit = new RateLimitOptions
+    {
+        Limit = 100,
+        Period = "1h",
+        Key = "event.data.customerId"  // Per-customer rate limit
+    }
+}
+```
+
+### Throttling
+
+```csharp
+options: new FunctionOptions
+{
+    Throttle = new ThrottleOptions
+    {
+        Limit = 10,
+        Period = "1m",
+        Key = "event.data.apiKey",
+        Burst = 5  // Allow burst of 5 before throttling
+    }
+}
+```
+
+### Debouncing
+
+```csharp
+options: new FunctionOptions
+{
+    Debounce = new DebounceOptions
+    {
+        Period = "5s",
+        Key = "event.data.userId",
+        Timeout = "1m"  // Max wait time
+    }
+}
+```
+
+### Event Batching
+
+```csharp
+options: new FunctionOptions
+{
+    Batch = new BatchOptions
+    {
+        MaxSize = 100,
+        Timeout = "10s",
+        Key = "event.data.tenantId"
+    }
+}
+```
+
+### Cancellation
+
+```csharp
+options: new FunctionOptions
+{
+    Cancellation = new CancellationOptions
+    {
+        Event = "order/cancelled",
+        Match = "async.data.orderId == event.data.orderId"
+    }
+}
+```
+
+### Retries
+
+```csharp
+options: new FunctionOptions
 {
     Retry = new RetryOptions
     {
-        Attempts = 3,
-        Interval = 1000,   // Base interval in ms
-        Factor = 2.0,      // Exponential backoff factor
-        MaxInterval = 30000 // Maximum retry interval
+        Attempts = 5,
+        Interval = 1000,    // Base interval in ms
+        Factor = 2.0,       // Exponential backoff
+        MaxInterval = 60000 // Max 1 minute between retries
     }
-};
-
-// Execute a step with retry
-var result = await context.Step("api-call", async () =>
-{
-    // This code will automatically retry on exceptions
-    var response = await httpClient.GetAsync("https://api.example.com/data");
-    response.EnsureSuccessStatusCode();
-    return await response.Content.ReadFromJsonAsync<MyResponseType>();
-}, stepOptions);
+}
 ```
 
-## Secrets
+### Idempotency
 
 ```csharp
-// Register secrets when creating the client
-var inngestClient = new InngestClient(
-    eventKey: "your-event-key",
-    signingKey: "your-signing-key"
-);
-inngestClient.AddSecret("API_KEY", "secret-value");
-
-// Access secrets in your function
-inngestClient.CreateFunction("example-with-secrets", async (context) =>
+options: new FunctionOptions
 {
-    var result = await context.Step("use-secret", async () =>
+    IdempotencyKey = "event.data.transactionId"
+}
+```
+
+## Error Handling
+
+### Non-Retriable Errors
+
+```csharp
+await ctx.Step.Run("validate", () =>
+{
+    if (!IsValid(data))
     {
-        var apiKey = context.GetSecret("API_KEY");
-        // Use the API key to make authenticated requests
-        return new { success = true };
-    });
-    
-    return result;
+        // This error won't be retried
+        throw new NonRetriableException("Invalid data format");
+    }
+    return data;
 });
 ```
 
-## Function Steps Registration
-
-When creating functions with Inngest, you must register all steps that your function will use. This ensures that the Inngest server knows about your function's structure during sync.
+### Retry-After Errors
 
 ```csharp
-// Define a function with steps
-inngestClient.CreateFunction("my-function", async (context) =>
+await ctx.Step.Run("call-api", async () =>
 {
-    // Step 1: Log the event
-    await context.Step("log-event", async () =>
+    var response = await client.GetAsync(url);
+    if (response.StatusCode == HttpStatusCode.TooManyRequests)
     {
-        Console.WriteLine("Processing event...");
-        return true;
-    });
-
-    // Step 2: Sleep for a moment
-    await context.Sleep("wait-a-bit", TimeSpan.FromSeconds(1));
-
-    // Step 3: Process data with retry options
-    var result = await context.Step("process-data", async () =>
-    {
-        // Your logic here
-        return new { success = true };
-    }, new StepOptions
-    {
-        Retry = new RetryOptions { Attempts = 3 }
-    });
-
-    return result;
-})
-// Register the steps so Inngest knows about them during sync
-.WithStep("log-event", "Log the event data") 
-.WithSleep("wait-a-bit", 1)
-.WithStep("process-data", "Process data with retries", new RetryOptions
-{
-    Attempts = 3
+        // Retry after the specified time
+        throw new RetryAfterException(TimeSpan.FromMinutes(5));
+    }
+    return await response.Content.ReadAsStringAsync();
 });
 ```
 
-If steps are not registered, Inngest will throw errors like "Function has no steps" during sync.
+## Cron Triggers
 
-## Running Inngest Dev Server
-
+```csharp
+inngest.CreateFunction(
+    id: "daily-cleanup",
+    name: "Daily Cleanup",
+    triggers: new[] { FunctionTrigger.CreateCronTrigger("0 0 * * *") }, // Every day at midnight
+    handler: async (ctx) =>
+    {
+        await ctx.Step.Run("cleanup", () => CleanupOldRecords());
+        return new { cleaned = true };
+    });
 ```
+
+## Running Locally
+
+1. Start the Inngest Dev Server:
+```bash
 npx inngest-cli@latest dev --no-discovery
 ```
+
+2. Run your .NET application:
+```bash
+dotnet run
+```
+
+3. Open the Inngest Dev Server UI at http://localhost:8288 to see your functions and trigger events.
 
 ## License
 
 MIT
-
-
