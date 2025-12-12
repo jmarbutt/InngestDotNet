@@ -343,17 +343,72 @@ inngest.CreateFunction(
 
 ## Running Locally
 
-1. Start the Inngest Dev Server:
+### Prerequisites
+
+- [.NET 8.0 SDK](https://dotnet.microsoft.com/download) or later
+- [Node.js](https://nodejs.org/) (for running the Inngest Dev Server via npx)
+
+### Option A: Auto-Discovery with `-u` Flag (Recommended)
+
+This approach tells the Dev Server where to find your app, enabling automatic function discovery.
+
+**Terminal 1** - Start your .NET app first:
+```bash
+dotnet run --project InngestExample
+```
+
+**Terminal 2** - Start the Dev Server pointing to your app:
+```bash
+npx inngest-cli@latest dev -u http://localhost:5000/api/inngest
+```
+
+The Dev Server will automatically discover and sync your functions.
+
+### Option B: Manual Registration
+
+If you prefer to start the Dev Server first:
+
+**Terminal 1** - Start the Dev Server:
 ```bash
 npx inngest-cli@latest dev --no-discovery
 ```
 
-2. Run your .NET application:
+**Terminal 2** - Start your .NET app:
 ```bash
-dotnet run
+dotnet run --project InngestExample
 ```
 
-3. Open the Inngest Dev Server UI at http://localhost:8288 to see your functions and trigger events.
+The `--no-discovery` flag prevents auto-discovery. Your app will register its functions when it starts.
+
+> **Note:** Leave both terminals running during development.
+
+### Access the Dev Server UI
+
+Open your browser to [http://localhost:8288](http://localhost:8288) to:
+
+- View all registered functions
+- Send test events to trigger functions
+- Monitor function executions in real-time
+- Inspect step-by-step execution and retries
+- Debug failures and view logs
+
+### Environment Variables for Local Development
+
+For local development, you typically don't need to set any environment variables. The SDK auto-detects the Dev Server.
+
+To explicitly configure the Dev Server URL:
+
+```bash
+export INNGEST_DEV=http://localhost:8288
+```
+
+### Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| Functions not appearing in Dev Server | Ensure your app is running and the `/api/inngest` endpoint is accessible |
+| "Connection refused" errors | Check that the Dev Server is running on port 8288 |
+| Events not triggering functions | Verify the event name matches your function's trigger exactly |
 
 ## License
 

@@ -26,17 +26,27 @@ dotnet build -c Release
 
 ## Running with Inngest Dev Server
 
-The SDK requires the Inngest Dev Server for local development:
+The SDK requires the Inngest Dev Server for local development. The dev server runs at `http://localhost:8288`.
+
+### Option A: Auto-Discovery (Recommended)
 
 ```bash
-# Start the Inngest Dev Server (in a separate terminal)
-npx inngest-cli@latest dev --no-discovery
-
-# Then run the example app
+# Terminal 1: Start the .NET app first
 dotnet run --project InngestExample
+
+# Terminal 2: Start the Dev Server with app URL
+npx inngest-cli@latest dev -u http://localhost:5000/api/inngest
 ```
 
-The dev server runs at `http://localhost:8288` by default. The example app registers at `/api/inngest`.
+### Option B: Manual Registration
+
+```bash
+# Terminal 1: Start the Dev Server without discovery
+npx inngest-cli@latest dev --no-discovery
+
+# Terminal 2: Start the .NET app (registers on startup)
+dotnet run --project InngestExample
+```
 
 ## Architecture
 

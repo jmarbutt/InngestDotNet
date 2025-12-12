@@ -291,51 +291,58 @@ public class InngestClient : IInngestClient
             return;
         }
 
-        // Check for deployId query parameter
-        string? deployId = null;
-        if (request.Query.TryGetValue("deployId", out var deployIdValues))
+        try
         {
-            deployId = deployIdValues.FirstOrDefault();
-        }
+            // Check for deployId query parameter
+            string? deployId = null;
+            if (request.Query.TryGetValue("deployId", out var deployIdValues))
+            {
+                deployId = deployIdValues.FirstOrDefault();
+            }
 
-        // Determine URL that Inngest should use to reach this service
-        var serveOrigin = Environment.GetEnvironmentVariable("INNGEST_SERVE_ORIGIN");
+            // Determine URL that Inngest should use to reach this service
+            var serveOrigin = Environment.GetEnvironmentVariable("INNGEST_SERVE_ORIGIN");
         var servePath = Environment.GetEnvironmentVariable("INNGEST_SERVE_PATH");
         
         // Try to determine the URL that Inngest can use to reach this service
         string url;
         if (!string.IsNullOrEmpty(serveOrigin))
         {
-            url = string.IsNullOrEmpty(servePath) 
-                ? serveOrigin 
+            url = string.IsNullOrEmpty(servePath)
+                ? serveOrigin
                 : $"{serveOrigin.TrimEnd('/')}/{servePath.TrimStart('/')}";
         }
         else
         {
             // Try to infer from request
             var host = request.Headers.Host.ToString() ?? "localhost";
-            var scheme = request.Headers.ContainsKey("X-Forwarded-Proto") 
-                ? request.Headers["X-Forwarded-Proto"].ToString() 
-                : request.Scheme;
-                
+
+            // In dev mode, prefer http to avoid HTTPS issues
+            var scheme = _isDev ? "http" : (request.Headers.ContainsKey("X-Forwarded-Proto")
+                ? request.Headers["X-Forwarded-Proto"].ToString()
+                : request.Scheme);
+
             // If host doesn't include a protocol, add it
             if (!host.StartsWith("http://") && !host.StartsWith("https://"))
             {
                 host = $"{scheme}://{host}";
             }
-            
+
             // Use the full request path if servePath is not specified
-            var path = string.IsNullOrEmpty(servePath) 
-                ? request.PathBase.ToString() 
+            // PathBase contains the mapped path when using app.Map()
+            var path = string.IsNullOrEmpty(servePath)
+                ? request.PathBase.ToString()
                 : servePath;
-            
+
             // Ensure path starts with a slash if it's not empty
             if (!string.IsNullOrEmpty(path) && !path.StartsWith("/"))
             {
                 path = $"/{path}";
             }
-            
+
             url = $"{host}{path}";
+
+            Console.WriteLine($"[Inngest] URL construction: host={host}, pathBase={request.PathBase}, path={path}");
         }
 
         // Build up the list of functions to register
@@ -386,7 +393,7 @@ public class InngestClient : IInngestClient
 
                     if (step.RetryOptions != null)
                     {
-                        stepObj["retries"] = BuildRetryConfig(step.RetryOptions);
+                        stepObj["retries"] = BuildStepRetryConfig(step.RetryOptions);
                     }
 
                     stepsDict[step.Id] = stepObj;
@@ -408,7 +415,7 @@ public class InngestClient : IInngestClient
 
                 if (fn.Options?.Retry != null)
                 {
-                    defaultStep["retries"] = BuildRetryConfig(fn.Options.Retry);
+                    defaultStep["retries"] = BuildStepRetryConfig(fn.Options.Retry);
                 }
 
                 stepsDict["step"] = defaultStep;
@@ -528,10 +535,10 @@ public class InngestClient : IInngestClient
                     functionObj["idempotency"] = fn.Options.IdempotencyKey;
                 }
 
-                // Retries at function level
-                if (fn.Options.Retry != null)
+                // Retries at function level - Inngest expects just an integer
+                if (fn.Options.Retry != null && fn.Options.Retry.Attempts.HasValue)
                 {
-                    functionObj["retries"] = BuildRetryConfig(fn.Options.Retry);
+                    functionObj["retries"] = fn.Options.Retry.Attempts.Value;
                 }
             }
 
@@ -551,7 +558,8 @@ public class InngestClient : IInngestClient
         };
         
         // Log information about registration for debugging
-        Console.WriteLine($"Registering Inngest functions with URL: {url}");
+        Console.WriteLine($"[Inngest] Registering {fnArray.Count} functions with URL: {url}");
+        Console.WriteLine($"[Inngest] Sending registration to: {_apiOrigin}/fn/register");
 
         // Prepare the register URL
         var registerUrl = $"{_apiOrigin}/fn/register";
@@ -612,10 +620,24 @@ public class InngestClient : IInngestClient
         else
         {
             var errorContent = await registerResponse.Content.ReadAsStringAsync();
+            Console.WriteLine($"[Inngest] Registration failed with status {registerResponse.StatusCode}: {errorContent}");
             response.StatusCode = StatusCodes.Status500InternalServerError;
-            await response.WriteAsJsonAsync(new 
-            { 
+            await response.WriteAsJsonAsync(new
+            {
+                error = "internal_server_error",
                 message = $"Sync failed: {errorContent}",
+                modified = false
+            }, _jsonOptions);
+        }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Inngest] Exception during sync: {ex}");
+            response.StatusCode = StatusCodes.Status500InternalServerError;
+            await response.WriteAsJsonAsync(new
+            {
+                error = "internal_server_error",
+                message = $"Sync exception: {ex.Message}",
                 modified = false
             }, _jsonOptions);
         }
@@ -949,24 +971,15 @@ public class InngestClient : IInngestClient
     }
 
     /// <summary>
-    /// Builds a retry configuration object for the sync payload
+    /// Builds a step-level retry configuration object for the sync payload
+    /// Step retries use an object format with 'attempts' field
     /// </summary>
-    private static object BuildRetryConfig(RetryOptions retry)
+    private static object BuildStepRetryConfig(RetryOptions retry)
     {
         var config = new Dictionary<string, object>();
 
         if (retry.Attempts.HasValue)
             config["attempts"] = retry.Attempts.Value;
-
-        // Convert millisecond intervals to Inngest time strings if present
-        if (retry.Interval.HasValue)
-            config["minDelay"] = $"{retry.Interval.Value}ms";
-
-        if (retry.MaxInterval.HasValue)
-            config["maxDelay"] = $"{retry.MaxInterval.Value}ms";
-
-        if (retry.Factor.HasValue)
-            config["factor"] = retry.Factor.Value;
 
         return config;
     }
