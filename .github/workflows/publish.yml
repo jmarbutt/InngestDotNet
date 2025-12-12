@@ -1,0 +1,42 @@
+name: Publish to NuGet
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      - name: Restore dependencies
+        run: dotnet restore Inngest/Inngest.csproj
+
+      - name: Build
+        run: dotnet build Inngest/Inngest.csproj --configuration Release --no-restore -p:Version=${{ steps.version.outputs.VERSION }}
+
+      - name: Test
+        run: dotnet test Inngest.Tests/Inngest.Tests.csproj --configuration Release --verbosity normal
+
+      - name: Pack
+        run: dotnet pack Inngest/Inngest.csproj --configuration Release --no-build -p:Version=${{ steps.version.outputs.VERSION }} --output ./nupkg
+
+      - name: Push to NuGet
+        run: dotnet nuget push ./nupkg/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-package
+          path: ./nupkg/*.nupkg
