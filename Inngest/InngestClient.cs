@@ -29,7 +29,7 @@ public class InngestClient : IInngestClient
     private readonly Dictionary<string, string> _secrets = new();
     private readonly string _environment;
     private readonly bool _isDev;
-    private readonly string _sdkVersion = "1.1.1";
+    private readonly string _sdkVersion = "1.2.0";
     private readonly string _appId;
     private readonly ILogger _logger;
     private readonly IInngestFunctionRegistry? _registry;
@@ -420,6 +420,12 @@ public class InngestClient : IInngestClient
 
         try
         {
+            // Check for sync kind - in-band vs out-of-band
+            var syncKind = request.Headers.TryGetValue("X-Inngest-Sync-Kind", out var syncKindValues)
+                ? syncKindValues.FirstOrDefault()
+                : null;
+            var useInBandSync = string.Equals(syncKind, "inband", StringComparison.OrdinalIgnoreCase);
+
             // Check for deployId query parameter
             string? deployId = null;
             if (request.Query.TryGetValue("deployId", out var deployIdValues))
@@ -429,7 +435,7 @@ public class InngestClient : IInngestClient
 
             // Determine URL that Inngest should use to reach this service
             var serveOrigin = Environment.GetEnvironmentVariable("INNGEST_SERVE_ORIGIN");
-        var servePath = Environment.GetEnvironmentVariable("INNGEST_SERVE_PATH");
+            var servePath = Environment.GetEnvironmentVariable("INNGEST_SERVE_PATH");
         
         // Try to determine the URL that Inngest can use to reach this service
         string url;
@@ -672,6 +678,98 @@ public class InngestClient : IInngestClient
             fnArray.Add(functionObj);
         }
 
+        // Handle in-band sync - return all data directly in the response
+        if (useInBandSync)
+        {
+            _logger.LogInformation("In-band sync: returning {FunctionCount} functions with URL: {Url}", fnArray.Count, url);
+
+            // Build capabilities
+            var capabilities = new Dictionary<string, string>
+            {
+                ["in_band_sync"] = "v1"
+            };
+
+            // Build inspection data
+            var inspection = new Dictionary<string, object?>
+            {
+                ["api_origin"] = _apiOrigin,
+                ["app_id"] = _appId,
+                ["authentication_succeeded"] = true,
+                ["capabilities"] = capabilities,
+                ["env"] = _environment,
+                ["event_api_origin"] = _eventApiOrigin,
+                ["framework"] = "aspnetcore",
+                ["has_event_key"] = !string.IsNullOrEmpty(_eventKey),
+                ["has_signing_key"] = !string.IsNullOrEmpty(_signingKey),
+                ["has_signing_key_fallback"] = !string.IsNullOrEmpty(_signingKeyFallback),
+                ["mode"] = _isDev ? "dev" : "cloud",
+                ["sdk_language"] = "csharp",
+                ["sdk_version"] = _sdkVersion,
+                ["serve_origin"] = serveOrigin,
+                ["serve_path"] = servePath
+            };
+
+            // Hash keys for inspection if present
+            if (!string.IsNullOrEmpty(_eventKey))
+            {
+                using var sha256 = SHA256.Create();
+                var hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(_eventKey));
+                inspection["event_key_hash"] = Convert.ToHexString(hashBytes).ToLower()[..16];
+            }
+            if (!string.IsNullOrEmpty(_signingKey))
+            {
+                using var sha256 = SHA256.Create();
+                var hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(_signingKey));
+                inspection["signing_key_hash"] = Convert.ToHexString(hashBytes).ToLower()[..16];
+            }
+            if (!string.IsNullOrEmpty(_signingKeyFallback))
+            {
+                using var sha256 = SHA256.Create();
+                var hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(_signingKeyFallback));
+                inspection["signing_key_fallback_hash"] = Convert.ToHexString(hashBytes).ToLower()[..16];
+            }
+
+            // Build the in-band sync response
+            var inBandResponse = new Dictionary<string, object?>
+            {
+                ["app_id"] = _appId,
+                ["env"] = _isDev ? null : _environment,
+                ["framework"] = "aspnetcore",
+                ["functions"] = fnArray,
+                ["inspection"] = inspection,
+                ["platform"] = null,
+                ["sdk_author"] = "inngest",
+                ["sdk_language"] = "csharp",
+                ["sdk_version"] = _sdkVersion,
+                ["url"] = url
+            };
+
+            // Set response headers
+            response.Headers["X-Inngest-Sync-Kind"] = "inband";
+            response.Headers["Content-Type"] = "application/json";
+
+            // Sign the response if not in dev mode
+            if (!_isDev && !string.IsNullOrEmpty(_signingKey))
+            {
+                var responseJson = JsonSerializer.Serialize(inBandResponse, _jsonOptions);
+                var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                var dataToSign = $"{responseJson}{timestamp}";
+
+                var normalizedKey = NormalizeSigningKey(_signingKey);
+                var keyBytes = Convert.FromHexString(normalizedKey);
+                using var hmac = new HMACSHA256(keyBytes);
+                var signatureBytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(dataToSign));
+                var signature = Convert.ToHexString(signatureBytes).ToLower();
+
+                response.Headers["X-Inngest-Signature"] = $"t={timestamp}&s={signature}";
+            }
+
+            response.StatusCode = StatusCodes.Status200OK;
+            await response.WriteAsJsonAsync(inBandResponse, _jsonOptions);
+            return;
+        }
+
+        // Out-of-band sync - POST to Inngest API
         // Create register payload according to the SDK specification
         var registerPayload = new
         {
@@ -683,9 +781,9 @@ public class InngestClient : IInngestClient
             framework = "aspnetcore",
             functions = fnArray
         };
-        
+
         // Log information about registration for debugging
-        _logger.LogInformation("Registering {FunctionCount} functions with URL: {Url}", fnArray.Count, url);
+        _logger.LogInformation("Out-of-band sync: Registering {FunctionCount} functions with URL: {Url}", fnArray.Count, url);
         _logger.LogDebug("Sending registration to: {ApiOrigin}/fn/register", _apiOrigin);
 
         // Prepare the register URL
