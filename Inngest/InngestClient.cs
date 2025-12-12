@@ -29,7 +29,7 @@ public class InngestClient : IInngestClient
     private readonly Dictionary<string, string> _secrets = new();
     private readonly string _environment;
     private readonly bool _isDev;
-    private readonly string _sdkVersion = "1.1.0";
+    private readonly string _sdkVersion = "1.1.1";
     private readonly string _appId;
     private readonly ILogger _logger;
     private readonly IInngestFunctionRegistry? _registry;
@@ -706,18 +706,15 @@ public class InngestClient : IInngestClient
         
         if (!_isDev && !string.IsNullOrEmpty(_signingKey))
         {
-            // Create a bearer token from the hashed signing key as per spec
-            // Format: signkey-{env}-{sha256_hash_of_normalized_key}
-            // 1. Extract the prefix (signkey-{env}-)
-            // 2. Normalize the key to get just the actual key material
-            // 3. Hash the normalized key
-            // 4. Reconstruct as signkey-{env}-{hash}
+            // Create a bearer token from the hashed signing key as per SDK spec
+            // The key material (after prefix) must be treated as hex and hashed with SHA256
+            // See: https://github.com/inngest/inngest/blob/main/docs/SDK_SPEC.md
             var prefixMatch = SigningKeyPrefixRegex.Match(_signingKey);
             var prefix = prefixMatch.Success ? prefixMatch.Value.TrimEnd('-') : "signkey-prod";
             var normalizedKey = NormalizeSigningKey(_signingKey);
 
             using var sha256 = SHA256.Create();
-            var keyBytes = Encoding.UTF8.GetBytes(normalizedKey);
+            var keyBytes = Convert.FromHexString(normalizedKey);  // Treat as hex, not UTF-8
             var hashBytes = sha256.ComputeHash(keyBytes);
             var hashedKey = $"{prefix}-{Convert.ToHexString(hashBytes).ToLower()}";
             requestMessage.Headers.Add("Authorization", $"Bearer {hashedKey}");
