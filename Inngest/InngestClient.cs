@@ -1,6 +1,8 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using Inngest.Configuration;
 using Inngest.Exceptions;
 using Inngest.Internal;
@@ -27,7 +29,7 @@ public class InngestClient : IInngestClient
     private readonly Dictionary<string, string> _secrets = new();
     private readonly string _environment;
     private readonly bool _isDev;
-    private readonly string _sdkVersion = "0.2.0";
+    private readonly string _sdkVersion = "0.3.0";
     private readonly string _appId;
     private readonly ILogger _logger;
     private readonly IInngestFunctionRegistry? _registry;
@@ -287,72 +289,122 @@ public class InngestClient : IInngestClient
         // Skip verification for dev server
         if (_isDev)
         {
+            _logger.LogDebug("Skipping signature verification in dev mode");
             return true;
         }
 
         var request = context.Request;
-        
+
         // Check if we have a signing key
         if (string.IsNullOrEmpty(_signingKey) && string.IsNullOrEmpty(_signingKeyFallback))
         {
+            _logger.LogWarning("Signature verification failed: No signing key configured");
             return false;
         }
-        
+
         // Get the signature from the header
         if (!request.Headers.TryGetValue("X-Inngest-Signature", out var signatureHeader))
         {
+            _logger.LogWarning("Signature verification failed: X-Inngest-Signature header missing");
             return false;
         }
-        
+
         string signature = signatureHeader.ToString();
-        
+        _logger.LogDebug("Received signature header: {SignatureHeader}", signature);
+
         // Parse the signature components (t=timestamp&s=signature)
         var components = System.Web.HttpUtility.ParseQueryString(signature);
         if (!long.TryParse(components["t"], out long timestamp))
         {
+            _logger.LogWarning("Signature verification failed: Unable to parse timestamp from signature");
             return false;
         }
-        
+
         string signatureValue = components["s"] ?? "";
-        
+        if (string.IsNullOrEmpty(signatureValue))
+        {
+            _logger.LogWarning("Signature verification failed: No signature value in header");
+            return false;
+        }
+
         // Verify timestamp is not too old (within last 5 minutes)
         var timestampDateTime = DateTimeOffset.FromUnixTimeSeconds(timestamp);
-        if (DateTimeOffset.UtcNow.Subtract(timestampDateTime).TotalMinutes > 5)
+        var timeDelta = DateTimeOffset.UtcNow.Subtract(timestampDateTime);
+        if (timeDelta.TotalMinutes > 5)
         {
+            _logger.LogWarning("Signature verification failed: Timestamp too old ({TimeDelta:F1} minutes)", timeDelta.TotalMinutes);
             return false;
         }
-        
+
         // Read the request body
         request.EnableBuffering();
-        
+
         string requestBody;
         using (var reader = new StreamReader(request.Body, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, leaveOpen: true))
         {
             requestBody = await reader.ReadToEndAsync();
         }
-        
+
         // Reset the position so it can be read again in the handler
         request.Body.Position = 0;
-        
+
         // Try to verify with primary signing key
-        bool verified = VerifyHmacSha256(requestBody + timestamp, _signingKey, signatureValue);
-        
+        // The data to sign is: body + timestamp (as string)
+        var dataToSign = requestBody + timestamp;
+        bool verified = VerifyHmacSha256(dataToSign, _signingKey, signatureValue);
+
         // If primary fails and we have a fallback, try that
         if (!verified && !string.IsNullOrEmpty(_signingKeyFallback))
         {
-            verified = VerifyHmacSha256(requestBody + timestamp, _signingKeyFallback, signatureValue);
+            _logger.LogDebug("Primary signing key verification failed, trying fallback key");
+            verified = VerifyHmacSha256(dataToSign, _signingKeyFallback, signatureValue);
         }
-        
+
+        if (!verified)
+        {
+            _logger.LogWarning("Signature verification failed: HMAC mismatch (key prefix: {KeyPrefix})",
+                SigningKeyPrefixRegex.Match(_signingKey).Value);
+        }
+        else
+        {
+            _logger.LogDebug("Signature verification succeeded");
+        }
+
         return verified;
     }
     
+    /// <summary>
+    /// Regex pattern to match and remove the signkey prefix (e.g., "signkey-prod-", "signkey-test-")
+    /// The format is: signkey-{env}-{actual_key}
+    /// </summary>
+    private static readonly Regex SigningKeyPrefixRegex = new(@"^signkey-\w+-", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Normalizes a signing key by removing the signkey-{env}- prefix.
+    /// The Inngest signing key format is: signkey-{env}-{actual_key_hex}
+    /// For HMAC verification, only the actual key portion should be used.
+    /// </summary>
+    private static string NormalizeSigningKey(string key)
+    {
+        if (string.IsNullOrEmpty(key))
+            return key;
+
+        return SigningKeyPrefixRegex.Replace(key, "");
+    }
+
     private bool VerifyHmacSha256(string data, string key, string expectedSignature)
     {
-        using var hmac = new System.Security.Cryptography.HMACSHA256(Encoding.UTF8.GetBytes(key));
+        // Normalize the key by removing the signkey-{env}- prefix
+        var normalizedKey = NormalizeSigningKey(key);
+
+        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(normalizedKey));
         byte[] hashBytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(data));
         string computedSignature = Convert.ToHexString(hashBytes).ToLower();
-        
-        return computedSignature == expectedSignature.ToLower();
+
+        // Use constant-time comparison to prevent timing attacks
+        return CryptographicOperations.FixedTimeEquals(
+            Encoding.UTF8.GetBytes(computedSignature),
+            Encoding.UTF8.GetBytes(expectedSignature.ToLower()));
     }
 
     private async Task HandleSyncRequest(HttpContext context)
@@ -655,10 +707,19 @@ public class InngestClient : IInngestClient
         if (!_isDev && !string.IsNullOrEmpty(_signingKey))
         {
             // Create a bearer token from the hashed signing key as per spec
-            using var sha256 = System.Security.Cryptography.SHA256.Create();
-            var keyBytes = Encoding.UTF8.GetBytes(_signingKey.Replace("signkey-", ""));
+            // Format: signkey-{env}-{sha256_hash_of_normalized_key}
+            // 1. Extract the prefix (signkey-{env}-)
+            // 2. Normalize the key to get just the actual key material
+            // 3. Hash the normalized key
+            // 4. Reconstruct as signkey-{env}-{hash}
+            var prefixMatch = SigningKeyPrefixRegex.Match(_signingKey);
+            var prefix = prefixMatch.Success ? prefixMatch.Value.TrimEnd('-') : "signkey-prod";
+            var normalizedKey = NormalizeSigningKey(_signingKey);
+
+            using var sha256 = SHA256.Create();
+            var keyBytes = Encoding.UTF8.GetBytes(normalizedKey);
             var hashBytes = sha256.ComputeHash(keyBytes);
-            var hashedKey = $"signkey-{_signingKey.Split('-')[1]}-{Convert.ToHexString(hashBytes).ToLower()}";
+            var hashedKey = $"{prefix}-{Convert.ToHexString(hashBytes).ToLower()}";
             requestMessage.Headers.Add("Authorization", $"Bearer {hashedKey}");
         }
         
