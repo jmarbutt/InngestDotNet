@@ -4,10 +4,12 @@ A .NET SDK for [Inngest](https://www.inngest.com/), a platform for building reli
 
 ## Features
 
+- **Attribute-based functions**: Define functions using familiar .NET patterns with attributes
+- **Full dependency injection**: Constructor injection with scoped services per function invocation
 - **Durable execution**: Steps automatically retry and resume from failures
 - **Step primitives**: Run, Sleep, SleepUntil, WaitForEvent, Invoke, SendEvent
 - **Flow control**: Concurrency, rate limiting, throttling, debounce, batching
-- **Full observability**: Built-in logging and tracing support
+- **Full observability**: Built-in logging with ILogger support
 
 ## Installation
 
@@ -17,56 +19,193 @@ dotnet add package Inngest.NET
 
 ## Quick Start
 
+### 1. Configure Inngest in Program.cs
+
 ```csharp
 using Inngest;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add Inngest with DI
-builder.Services.AddInngest(options =>
-{
-    options.AppId = "my-app";
-    // Keys can also be set via INNGEST_EVENT_KEY and INNGEST_SIGNING_KEY env vars
-});
+// Add Inngest with configuration and auto-discover functions
+builder.Services
+    .AddInngest(options =>
+    {
+        options.AppId = "my-app";
+        options.IsDev = true; // Use Inngest Dev Server
+    })
+    .AddFunctionsFromAssembly(typeof(Program).Assembly);
 
 var app = builder.Build();
 
-var inngest = app.Services.GetRequiredService<IInngestClient>();
-
-// Create a function that responds to events
-inngest.CreateFunction(
-    id: "process-order",
-    name: "Process Order",
-    triggers: new[] { FunctionTrigger.CreateEventTrigger("shop/order.created") },
-    handler: async (ctx) =>
-    {
-        // Steps are durable - they retry on failure and skip on replay
-        var validated = await ctx.Step.Run("validate-order", async () =>
-        {
-            // Your business logic here
-            return new { orderId = ctx.Event.Data.GetProperty("orderId").GetString() };
-        });
-
-        // Sleep for 5 minutes (durable - survives restarts)
-        await ctx.Step.Sleep("wait-for-processing", TimeSpan.FromMinutes(5));
-
-        // Wait for a payment confirmation event
-        var payment = await ctx.Step.WaitForEvent<PaymentConfirmation>(
-            "wait-for-payment",
-            new WaitForEventOptions
-            {
-                Event = "stripe/payment.succeeded",
-                Timeout = "1h",
-                Match = "async.data.orderId == event.data.orderId"
-            });
-
-        return new { status = "completed", orderId = validated.orderId };
-    });
-
-// Set up endpoint for Inngest to call your functions
+// Mount the Inngest endpoint
 app.UseInngest("/api/inngest");
 
 app.Run();
+```
+
+### 2. Create a Function
+
+```csharp
+using Inngest;
+using Inngest.Attributes;
+
+[InngestFunction("process-order", Name = "Process Order")]
+[EventTrigger("shop/order.created")]
+[Retry(Attempts = 5)]
+public class OrderProcessor : IInngestFunction
+{
+    private readonly IOrderService _orderService;
+    private readonly ILogger<OrderProcessor> _logger;
+
+    // Constructor injection - services are scoped per function invocation
+    public OrderProcessor(IOrderService orderService, ILogger<OrderProcessor> logger)
+    {
+        _orderService = orderService;
+        _logger = logger;
+    }
+
+    public async Task<object?> ExecuteAsync(InngestContext context, CancellationToken cancellationToken)
+    {
+        // Step 1: Validate order (memoized - runs once, replays on retries)
+        var order = await context.Step.Run("validate-order", async () =>
+        {
+            _logger.LogInformation("Validating order");
+            return await _orderService.ValidateAsync(context.Event.Data);
+        });
+
+        // Step 2: Sleep for 5 minutes (durable - survives restarts)
+        await context.Step.Sleep("wait-for-processing", TimeSpan.FromMinutes(5));
+
+        // Step 3: Process payment
+        var payment = await context.Step.Run("process-payment", async () =>
+        {
+            return await _orderService.ProcessPaymentAsync(order.Id);
+        });
+
+        return new { status = "completed", orderId = order.Id };
+    }
+}
+```
+
+### 3. Strongly-Typed Event Data
+
+```csharp
+public class OrderCreatedEvent
+{
+    public string? OrderId { get; set; }
+    public decimal Amount { get; set; }
+    public string? CustomerId { get; set; }
+}
+
+[InngestFunction("typed-order-handler", Name = "Typed Order Handler")]
+[EventTrigger("shop/order.created")]
+public class TypedOrderHandler : IInngestFunction<OrderCreatedEvent>
+{
+    public async Task<object?> ExecuteAsync(
+        InngestContext<OrderCreatedEvent> context,
+        CancellationToken cancellationToken)
+    {
+        // Access strongly-typed event data
+        var eventData = context.Event.Data;
+
+        await context.Step.Run("process", () =>
+        {
+            Console.WriteLine($"Order {eventData?.OrderId} for ${eventData?.Amount}");
+            return true;
+        });
+
+        return new { processed = true };
+    }
+}
+```
+
+## Function Attributes
+
+### InngestFunction
+
+Marks a class as an Inngest function:
+
+```csharp
+[InngestFunction("my-function-id", Name = "Human Readable Name")]
+```
+
+### EventTrigger
+
+Triggers the function when a specific event is received:
+
+```csharp
+[EventTrigger("user/signed.up")]
+[EventTrigger("user/invited", Expression = "event.data.role == 'admin'")] // With filter
+```
+
+### CronTrigger
+
+Triggers the function on a schedule:
+
+```csharp
+[CronTrigger("0 0 * * *")]  // Every day at midnight
+[CronTrigger("*/30 * * * *")]  // Every 30 minutes
+```
+
+### Retry
+
+Configures retry behavior:
+
+```csharp
+[Retry(Attempts = 5)]
+```
+
+### Concurrency
+
+Limits concurrent executions:
+
+```csharp
+[Concurrency(5)]  // Max 5 concurrent executions
+[Concurrency(1, Key = "event.data.userId")]  // Per-user concurrency
+```
+
+### RateLimit
+
+Limits execution rate:
+
+```csharp
+[RateLimit(100, Period = "1h")]  // 100 per hour
+[RateLimit(10, Period = "1m", Key = "event.data.customerId")]  // Per-customer
+```
+
+## Configuration
+
+### Using Options Pattern
+
+```csharp
+// appsettings.json
+{
+  "Inngest": {
+    "AppId": "my-app",
+    "EventKey": "your-event-key",
+    "SigningKey": "your-signing-key"
+  }
+}
+
+// Program.cs
+builder.Services
+    .AddInngest(builder.Configuration.GetSection("Inngest"))
+    .AddFunctionsFromAssembly(typeof(Program).Assembly);
+```
+
+### Using Action Configuration
+
+```csharp
+builder.Services
+    .AddInngest(options =>
+    {
+        options.AppId = "my-app";
+        options.EventKey = "your-event-key";
+        options.SigningKey = "your-signing-key";
+        options.IsDev = builder.Environment.IsDevelopment();
+    })
+    .AddFunction<OrderProcessor>()
+    .AddFunction<EmailSender>();
 ```
 
 ## Environment Variables
@@ -84,24 +223,32 @@ app.Run();
 ## Sending Events
 
 ```csharp
-// Simple event
-await inngest.SendEventAsync("user.signed_up", new {
-    userId = "usr_123",
-    email = "user@example.com"
-});
+// Inject IInngestClient where needed
+public class OrderController : ControllerBase
+{
+    private readonly IInngestClient _inngest;
 
-// Event with metadata
-var evt = new InngestEvent("user.signed_up", new { userId = "usr_123" })
-    .WithUser(new { id = "usr_123" })
-    .WithIdempotencyKey("signup-usr_123");
+    public OrderController(IInngestClient inngest) => _inngest = inngest;
 
-await inngest.SendEventAsync(evt);
+    [HttpPost]
+    public async Task<IActionResult> CreateOrder(Order order)
+    {
+        // Simple event
+        await _inngest.SendEventAsync("shop/order.created", new {
+            orderId = order.Id,
+            amount = order.Total
+        });
 
-// Batch events
-await inngest.SendEventsAsync(new[] {
-    new InngestEvent("order.created", new { orderId = "ord_1" }),
-    new InngestEvent("order.created", new { orderId = "ord_2" })
-});
+        // Event with metadata
+        var evt = new InngestEvent("shop/order.created", new { orderId = order.Id })
+            .WithUser(new { id = order.CustomerId })
+            .WithIdempotencyKey($"order-{order.Id}");
+
+        await _inngest.SendEventAsync(evt);
+
+        return Ok();
+    }
+}
 ```
 
 ## Step Primitives
@@ -109,38 +256,38 @@ await inngest.SendEventsAsync(new[] {
 ### step.Run - Execute code with automatic retry
 
 ```csharp
-var result = await ctx.Step.Run("fetch-user", async () =>
+var result = await context.Step.Run("fetch-user", async () =>
 {
     var user = await userService.GetUserAsync(userId);
     return user;
 });
 
 // Synchronous version
-var value = await ctx.Step.Run("compute", () => ComputeValue());
+var value = await context.Step.Run("compute", () => ComputeValue());
 ```
 
 ### step.Sleep - Pause execution
 
 ```csharp
 // Sleep for a duration
-await ctx.Step.Sleep("wait", TimeSpan.FromHours(1));
+await context.Step.Sleep("wait", TimeSpan.FromHours(1));
 
 // Sleep using Inngest time string format
-await ctx.Step.Sleep("wait", "30m");  // 30 minutes
-await ctx.Step.Sleep("wait", "2h30m"); // 2.5 hours
+await context.Step.Sleep("wait", "30m");  // 30 minutes
+await context.Step.Sleep("wait", "2h30m"); // 2.5 hours
 ```
 
 ### step.SleepUntil - Sleep until a specific time
 
 ```csharp
 var targetTime = DateTimeOffset.UtcNow.AddDays(1);
-await ctx.Step.SleepUntil("wait-until-tomorrow", targetTime);
+await context.Step.SleepUntil("wait-until-tomorrow", targetTime);
 ```
 
 ### step.WaitForEvent - Wait for another event
 
 ```csharp
-var payment = await ctx.Step.WaitForEvent<PaymentData>(
+var payment = await context.Step.WaitForEvent<PaymentData>(
     "wait-payment",
     new WaitForEventOptions
     {
@@ -152,14 +299,14 @@ var payment = await ctx.Step.WaitForEvent<PaymentData>(
 if (payment == null)
 {
     // Timeout occurred
-    await ctx.Step.Run("handle-timeout", () => CancelOrder());
+    await context.Step.Run("handle-timeout", () => CancelOrder());
 }
 ```
 
 ### step.Invoke - Call another Inngest function
 
 ```csharp
-var result = await ctx.Step.Invoke<ProcessResult>(
+var result = await context.Step.Invoke<ProcessResult>(
     "process-payment",
     new InvokeOptions
     {
@@ -172,128 +319,10 @@ var result = await ctx.Step.Invoke<ProcessResult>(
 ### step.SendEvent - Emit events from within a function
 
 ```csharp
-await ctx.Step.SendEvent("notify-team", new InngestEvent(
+await context.Step.SendEvent("notify-team", new InngestEvent(
     "notification/send",
     new { message = "Order completed!", channel = "slack" }
 ));
-```
-
-## Function Configuration
-
-### Concurrency
-
-```csharp
-inngest.CreateFunction(
-    id: "limited-function",
-    triggers: new[] { FunctionTrigger.CreateEventTrigger("task/created") },
-    handler: async (ctx) => { /* ... */ },
-    options: new FunctionOptions
-    {
-        // Simple concurrency limit
-        Concurrency = 5,
-
-        // Or advanced with key-based limits
-        ConcurrencyOptions = new ConcurrencyOptions
-        {
-            Limit = 1,
-            Key = "event.data.userId",  // One concurrent execution per user
-            Scope = "fn"  // "fn" or "env"
-        }
-    });
-```
-
-### Rate Limiting
-
-```csharp
-options: new FunctionOptions
-{
-    RateLimit = new RateLimitOptions
-    {
-        Limit = 100,
-        Period = "1h",
-        Key = "event.data.customerId"  // Per-customer rate limit
-    }
-}
-```
-
-### Throttling
-
-```csharp
-options: new FunctionOptions
-{
-    Throttle = new ThrottleOptions
-    {
-        Limit = 10,
-        Period = "1m",
-        Key = "event.data.apiKey",
-        Burst = 5  // Allow burst of 5 before throttling
-    }
-}
-```
-
-### Debouncing
-
-```csharp
-options: new FunctionOptions
-{
-    Debounce = new DebounceOptions
-    {
-        Period = "5s",
-        Key = "event.data.userId",
-        Timeout = "1m"  // Max wait time
-    }
-}
-```
-
-### Event Batching
-
-```csharp
-options: new FunctionOptions
-{
-    Batch = new BatchOptions
-    {
-        MaxSize = 100,
-        Timeout = "10s",
-        Key = "event.data.tenantId"
-    }
-}
-```
-
-### Cancellation
-
-```csharp
-options: new FunctionOptions
-{
-    Cancellation = new CancellationOptions
-    {
-        Event = "order/cancelled",
-        Match = "async.data.orderId == event.data.orderId"
-    }
-}
-```
-
-### Retries
-
-```csharp
-options: new FunctionOptions
-{
-    Retry = new RetryOptions
-    {
-        Attempts = 5,
-        Interval = 1000,    // Base interval in ms
-        Factor = 2.0,       // Exponential backoff
-        MaxInterval = 60000 // Max 1 minute between retries
-    }
-}
-```
-
-### Idempotency
-
-```csharp
-options: new FunctionOptions
-{
-    IdempotencyKey = "event.data.transactionId"
-}
 ```
 
 ## Error Handling
@@ -301,7 +330,7 @@ options: new FunctionOptions
 ### Non-Retriable Errors
 
 ```csharp
-await ctx.Step.Run("validate", () =>
+await context.Step.Run("validate", () =>
 {
     if (!IsValid(data))
     {
@@ -315,7 +344,7 @@ await ctx.Step.Run("validate", () =>
 ### Retry-After Errors
 
 ```csharp
-await ctx.Step.Run("call-api", async () =>
+await context.Step.Run("call-api", async () =>
 {
     var response = await client.GetAsync(url);
     if (response.StatusCode == HttpStatusCode.TooManyRequests)
@@ -325,20 +354,6 @@ await ctx.Step.Run("call-api", async () =>
     }
     return await response.Content.ReadAsStringAsync();
 });
-```
-
-## Cron Triggers
-
-```csharp
-inngest.CreateFunction(
-    id: "daily-cleanup",
-    name: "Daily Cleanup",
-    triggers: new[] { FunctionTrigger.CreateCronTrigger("0 0 * * *") }, // Every day at midnight
-    handler: async (ctx) =>
-    {
-        await ctx.Step.Run("cleanup", () => CleanupOldRecords());
-        return new { cleaned = true };
-    });
 ```
 
 ## Running Locally
@@ -354,7 +369,7 @@ This approach tells the Dev Server where to find your app, enabling automatic fu
 
 **Terminal 1** - Start your .NET app first:
 ```bash
-dotnet run --project InngestExample
+dotnet run --project YourProject
 ```
 
 **Terminal 2** - Start the Dev Server pointing to your app:
@@ -375,7 +390,7 @@ npx inngest-cli@latest dev --no-discovery
 
 **Terminal 2** - Start your .NET app:
 ```bash
-dotnet run --project InngestExample
+dotnet run --project YourProject
 ```
 
 The `--no-discovery` flag prevents auto-discovery. Your app will register its functions when it starts.

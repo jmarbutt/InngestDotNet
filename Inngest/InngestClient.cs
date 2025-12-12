@@ -1,7 +1,9 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Inngest.Configuration;
 using Inngest.Exceptions;
+using Inngest.Internal;
 using Inngest.Steps;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
@@ -28,6 +30,8 @@ public class InngestClient : IInngestClient
     private readonly string _sdkVersion = "0.2.0";
     private readonly string _appId;
     private readonly ILogger _logger;
+    private readonly IInngestFunctionRegistry? _registry;
+    private readonly IServiceProvider? _serviceProvider;
 
     /// <summary>
     /// Initialize a new Inngest client
@@ -80,7 +84,78 @@ public class InngestClient : IInngestClient
             DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
         };
     }
-    
+
+    /// <summary>
+    /// Initialize a new Inngest client with options pattern
+    /// </summary>
+    /// <param name="options">Configuration options</param>
+    /// <param name="registry">Function registry for attribute-based functions</param>
+    /// <param name="serviceProvider">Service provider for dependency injection</param>
+    /// <param name="httpClient">Optional custom HttpClient</param>
+    /// <param name="logger">Optional logger for diagnostics</param>
+    internal InngestClient(
+        InngestOptions options,
+        IInngestFunctionRegistry? registry = null,
+        IServiceProvider? serviceProvider = null,
+        HttpClient? httpClient = null,
+        ILogger<InngestClient>? logger = null)
+    {
+        _registry = registry;
+        _serviceProvider = serviceProvider;
+        _logger = logger ?? NullLogger<InngestClient>.Instance;
+
+        // Apply configuration from options
+        _eventKey = options.EventKey ?? "";
+        _signingKey = options.SigningKey ?? "";
+        _signingKeyFallback = options.SigningKeyFallback;
+        _environment = options.Environment ?? "dev";
+        _isDev = options.IsDev;
+        _appId = options.AppId ?? "inngest-app";
+
+        // Set API endpoints
+        var devServerUrl = options.DevServerUrl ?? "http://localhost:8288";
+
+        _apiOrigin = options.ApiOrigin ??
+                     (_isDev ? devServerUrl : "https://api.inngest.com");
+
+        _eventApiOrigin = options.EventApiOrigin ??
+                          (_isDev ? devServerUrl : "https://inn.gs");
+
+        _httpClient = httpClient ?? new HttpClient();
+
+        _jsonOptions = new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+        };
+
+        // Register functions from the registry
+        if (_registry != null)
+        {
+            RegisterFunctionsFromRegistry();
+        }
+    }
+
+    private void RegisterFunctionsFromRegistry()
+    {
+        if (_registry == null || _serviceProvider == null) return;
+
+        foreach (var registration in _registry.GetRegistrations())
+        {
+            var handler = FunctionAdapter.CreateHandler(registration, _serviceProvider);
+            var functionDefinition = new FunctionDefinition(
+                registration.Id,
+                registration.Name,
+                registration.Triggers,
+                handler,
+                registration.Options
+            );
+
+            var fullId = $"{_appId}-{registration.Id}";
+            _functions[registration.Id] = functionDefinition;
+        }
+    }
+
     /// <summary>
     /// Add a secret that will be accessible to your functions at runtime
     /// </summary>
@@ -342,7 +417,7 @@ public class InngestClient : IInngestClient
 
             url = $"{host}{path}";
 
-            Console.WriteLine($"[Inngest] URL construction: host={host}, pathBase={request.PathBase}, path={path}");
+            _logger.LogDebug("URL construction: host={Host}, pathBase={PathBase}, path={Path}", host, request.PathBase, path);
         }
 
         // Build up the list of functions to register
@@ -558,8 +633,8 @@ public class InngestClient : IInngestClient
         };
         
         // Log information about registration for debugging
-        Console.WriteLine($"[Inngest] Registering {fnArray.Count} functions with URL: {url}");
-        Console.WriteLine($"[Inngest] Sending registration to: {_apiOrigin}/fn/register");
+        _logger.LogInformation("Registering {FunctionCount} functions with URL: {Url}", fnArray.Count, url);
+        _logger.LogDebug("Sending registration to: {ApiOrigin}/fn/register", _apiOrigin);
 
         // Prepare the register URL
         var registerUrl = $"{_apiOrigin}/fn/register";
@@ -620,7 +695,7 @@ public class InngestClient : IInngestClient
         else
         {
             var errorContent = await registerResponse.Content.ReadAsStringAsync();
-            Console.WriteLine($"[Inngest] Registration failed with status {registerResponse.StatusCode}: {errorContent}");
+            _logger.LogError("Registration failed with status {StatusCode}: {ErrorContent}", registerResponse.StatusCode, errorContent);
             response.StatusCode = StatusCodes.Status500InternalServerError;
             await response.WriteAsJsonAsync(new
             {
@@ -632,7 +707,7 @@ public class InngestClient : IInngestClient
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[Inngest] Exception during sync: {ex}");
+            _logger.LogError(ex, "Exception during sync");
             response.StatusCode = StatusCodes.Status500InternalServerError;
             await response.WriteAsJsonAsync(new
             {

@@ -1,5 +1,10 @@
-﻿using Microsoft.AspNetCore.Builder;
+using Inngest.Configuration;
+using Inngest.Internal;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace Inngest;
 
@@ -27,23 +32,134 @@ public static class InngestMiddlewareExtensions
     }
 
     /// <summary>
-    /// Registers Inngest services with the dependency injection container
+    /// Registers Inngest services with the dependency injection container using the options pattern.
+    /// This is the recommended way to configure Inngest for production applications.
     /// </summary>
     /// <param name="services">The service collection</param>
-    /// <param name="eventKey">The Inngest event key for your application</param>
-    /// <param name="signingKey">The Inngest signing key for your application</param>
-    /// <param name="apiOrigin">Optional custom API origin URL</param>
-    /// <param name="eventApiOrigin">Optional custom event API origin URL</param>
-    /// <returns>The service collection for further configuration</returns>
-    public static IServiceCollection AddInngest(this IServiceCollection services, string eventKey, string signingKey, string? apiOrigin = null, string? eventApiOrigin = null)
+    /// <param name="configure">Action to configure Inngest options</param>
+    /// <returns>An InngestBuilder for registering functions</returns>
+    /// <example>
+    /// <code>
+    /// builder.Services
+    ///     .AddInngest(options =>
+    ///     {
+    ///         options.AppId = "my-app";
+    ///         options.EventKey = "...";
+    ///         options.SigningKey = "...";
+    ///     })
+    ///     .AddFunction&lt;OrderProcessor&gt;()
+    ///     .AddFunctionsFromAssembly(typeof(Program).Assembly);
+    /// </code>
+    /// </example>
+    public static InngestBuilder AddInngest(this IServiceCollection services, Action<InngestOptions>? configure = null)
     {
-        return services.AddSingleton<IInngestClient>(sp => 
+        // Configure options
+        var optionsBuilder = services.AddOptions<InngestOptions>();
+        if (configure != null)
         {
-            if (apiOrigin != null && eventApiOrigin != null)
-            {
-                return new InngestClient(eventKey, signingKey, apiOrigin, eventApiOrigin);
-            }
-            return new InngestClient(eventKey, signingKey);
+            optionsBuilder.Configure(configure);
+        }
+        optionsBuilder.PostConfigure(options =>
+        {
+            options.ApplyEnvironmentFallbacks();
+            options.Validate();
         });
+
+        // Create a shared builder that will be populated with function types
+        var inngestBuilder = new InngestBuilder(services);
+
+        // Register the function registry (will be populated when resolved)
+        services.AddSingleton<IInngestFunctionRegistry>(sp =>
+        {
+            var options = sp.GetRequiredService<IOptions<InngestOptions>>().Value;
+            var appId = options.AppId ?? "inngest-app";
+            var registry = new InngestFunctionRegistry(appId);
+
+            // Register all function types that were added via the builder
+            foreach (var functionType in inngestBuilder.GetFunctionTypes())
+            {
+                registry.RegisterFunction(functionType);
+            }
+
+            return registry;
+        });
+
+        // Register the Inngest client
+        services.AddSingleton<IInngestClient>(sp =>
+        {
+            var options = sp.GetRequiredService<IOptions<InngestOptions>>().Value;
+            var registry = sp.GetRequiredService<IInngestFunctionRegistry>();
+            var logger = sp.GetService<ILogger<InngestClient>>();
+
+            return new InngestClient(options, registry, sp, logger: logger);
+        });
+
+        return inngestBuilder;
     }
+
+    /// <summary>
+    /// Registers Inngest services with configuration from an IConfigurationSection.
+    /// Typically used to bind from appsettings.json.
+    /// </summary>
+    /// <param name="services">The service collection</param>
+    /// <param name="configuration">The configuration section containing Inngest settings</param>
+    /// <returns>An InngestBuilder for registering functions</returns>
+    /// <example>
+    /// <code>
+    /// // appsettings.json:
+    /// // {
+    /// //   "Inngest": {
+    /// //     "AppId": "my-app",
+    /// //     "EventKey": "...",
+    /// //     "SigningKey": "..."
+    /// //   }
+    /// // }
+    ///
+    /// builder.Services
+    ///     .AddInngest(builder.Configuration.GetSection("Inngest"))
+    ///     .AddFunctionsFromAssembly(typeof(Program).Assembly);
+    /// </code>
+    /// </example>
+    public static InngestBuilder AddInngest(this IServiceCollection services, IConfigurationSection configuration)
+    {
+        // Bind configuration to options
+        services.Configure<InngestOptions>(configuration);
+        services.PostConfigure<InngestOptions>(options =>
+        {
+            options.ApplyEnvironmentFallbacks();
+            options.Validate();
+        });
+
+        // Create a shared builder that will be populated with function types
+        var inngestBuilder = new InngestBuilder(services);
+
+        // Register the function registry (will be populated when resolved)
+        services.AddSingleton<IInngestFunctionRegistry>(sp =>
+        {
+            var options = sp.GetRequiredService<IOptions<InngestOptions>>().Value;
+            var appId = options.AppId ?? "inngest-app";
+            var registry = new InngestFunctionRegistry(appId);
+
+            // Register all function types that were added via the builder
+            foreach (var functionType in inngestBuilder.GetFunctionTypes())
+            {
+                registry.RegisterFunction(functionType);
+            }
+
+            return registry;
+        });
+
+        // Register the Inngest client
+        services.AddSingleton<IInngestClient>(sp =>
+        {
+            var options = sp.GetRequiredService<IOptions<InngestOptions>>().Value;
+            var registry = sp.GetRequiredService<IInngestFunctionRegistry>();
+            var logger = sp.GetService<ILogger<InngestClient>>();
+
+            return new InngestClient(options, registry, sp, logger: logger);
+        });
+
+        return inngestBuilder;
+    }
+
 }

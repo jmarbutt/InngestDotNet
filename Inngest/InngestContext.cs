@@ -39,6 +39,12 @@ public class InngestContext
     public ILogger Logger { get; }
 
     /// <summary>
+    /// Cancellation token for the current execution.
+    /// Check this token periodically in long-running operations.
+    /// </summary>
+    public CancellationToken CancellationToken { get; }
+
+    /// <summary>
     /// Creates a new InngestContext
     /// </summary>
     internal InngestContext(
@@ -46,13 +52,15 @@ public class InngestContext
         IEnumerable<InngestEvent> events,
         IStepTools stepTools,
         RunContext runContext,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        CancellationToken cancellationToken = default)
     {
         Event = evt;
         Events = events.ToList().AsReadOnly();
         Step = stepTools;
         Run = runContext;
         Logger = logger ?? NullLogger.Instance;
+        CancellationToken = cancellationToken;
     }
 }
 
@@ -76,8 +84,9 @@ public class InngestContext<TEventData> : InngestContext where TEventData : clas
         IEnumerable<InngestEvent> events,
         IStepTools stepTools,
         RunContext runContext,
-        ILogger? logger = null)
-        : base(evt, events, stepTools, runContext, logger)
+        ILogger? logger = null,
+        CancellationToken cancellationToken = default)
+        : base(evt, events, stepTools, runContext, logger, cancellationToken)
     {
         Event = evt;
     }
