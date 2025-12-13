@@ -29,7 +29,7 @@ public class InngestClient : IInngestClient
     private readonly Dictionary<string, string> _secrets = new();
     private readonly string _environment;
     private readonly bool _isDev;
-    private readonly string _sdkVersion = "1.2.2";
+    private readonly string _sdkVersion = "1.2.3";
     private readonly string _appId;
     private readonly ILogger _logger;
     private readonly IInngestFunctionRegistry? _registry;
@@ -778,6 +778,10 @@ public class InngestClient : IInngestClient
                 ["url"] = url
             };
 
+            // Serialize once to ensure consistency between signing and response
+            var responseJson = JsonSerializer.Serialize(inBandResponse, _jsonOptions);
+            _logger.LogDebug("In-band sync response: {ResponseJson}", responseJson);
+
             // Set response headers
             response.Headers["X-Inngest-Sync-Kind"] = "in_band";
             response.Headers["Content-Type"] = "application/json";
@@ -785,7 +789,6 @@ public class InngestClient : IInngestClient
             // Sign the response if not in dev mode
             if (!_isDev && !string.IsNullOrEmpty(_signingKey))
             {
-                var responseJson = JsonSerializer.Serialize(inBandResponse, _jsonOptions);
                 var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds(); // Unix seconds, not milliseconds
                 var dataToSign = $"{responseJson}{timestamp}";
 
@@ -799,7 +802,8 @@ public class InngestClient : IInngestClient
             }
 
             response.StatusCode = StatusCodes.Status200OK;
-            await response.WriteAsJsonAsync(inBandResponse, _jsonOptions);
+            // Write the exact JSON we signed (don't re-serialize)
+            await response.WriteAsync(responseJson);
             return;
         }
 
