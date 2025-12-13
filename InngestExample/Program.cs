@@ -86,6 +86,77 @@ app.MapGet("/health", () => Results.Ok(new { status = "healthy", timestamp = Dat
 .WithName("HealthCheck")
 .WithOpenApi();
 
+// =============================================================================
+// Step Error Testing Endpoints
+// =============================================================================
+
+// Test step error handling - demonstrates retry behavior
+app.MapPost("/api/test-step-error", async (
+    [FromServices] IInngestClient inngestClient,
+    [FromBody] TestStepErrorRequest request) =>
+{
+    var evt = new InngestEvent("test/step-error", new
+    {
+        failAt = request.FailAt,
+        nonRetriable = request.NonRetriable
+    });
+
+    var result = await inngestClient.SendEventAsync(evt);
+    return Results.Ok(new
+    {
+        success = result,
+        eventId = evt.Id,
+        message = $"Step error test triggered - failAt: {request.FailAt}, nonRetriable: {request.NonRetriable}"
+    });
+})
+.WithName("TestStepError")
+.WithDescription("Test step error handling and retry behavior")
+.WithOpenApi();
+
+// Test transient errors that succeed after retries
+app.MapPost("/api/test-transient-error", async (
+    [FromServices] IInngestClient inngestClient,
+    [FromBody] TestTransientErrorRequest? request) =>
+{
+    var evt = new InngestEvent("test/transient-error", new
+    {
+        message = request?.Message ?? "Testing transient failures"
+    });
+
+    var result = await inngestClient.SendEventAsync(evt);
+    return Results.Ok(new
+    {
+        success = result,
+        eventId = evt.Id,
+        message = "Transient error test triggered - will fail twice then succeed"
+    });
+})
+.WithName("TestTransientError")
+.WithDescription("Test transient errors that succeed after retries")
+.WithOpenApi();
+
+// Test retry-after delays
+app.MapPost("/api/test-retry-after", async (
+    [FromServices] IInngestClient inngestClient,
+    [FromBody] TestRetryAfterRequest? request) =>
+{
+    var evt = new InngestEvent("test/retry-after", new
+    {
+        delaySeconds = request?.DelaySeconds ?? 30
+    });
+
+    var result = await inngestClient.SendEventAsync(evt);
+    return Results.Ok(new
+    {
+        success = result,
+        eventId = evt.Id,
+        message = $"Retry-after test triggered - will wait {request?.DelaySeconds ?? 30}s before retrying"
+    });
+})
+.WithName("TestRetryAfter")
+.WithDescription("Test retry-after delays for rate limiting scenarios")
+.WithOpenApi();
+
 // Route to handle Inngest webhooks
 app.UseInngest("/api/inngest");
 
@@ -106,4 +177,30 @@ public class CreateOrderRequest
 {
     public required decimal Amount { get; set; }
     public required string CustomerId { get; set; }
+}
+
+public class TestStepErrorRequest
+{
+    /// <summary>
+    /// Which step should fail: "first", "second", or "none"
+    /// </summary>
+    public string FailAt { get; set; } = "first";
+
+    /// <summary>
+    /// If true, the error is non-retriable
+    /// </summary>
+    public bool NonRetriable { get; set; } = false;
+}
+
+public class TestTransientErrorRequest
+{
+    public string? Message { get; set; }
+}
+
+public class TestRetryAfterRequest
+{
+    /// <summary>
+    /// How many seconds to wait before retrying
+    /// </summary>
+    public int DelaySeconds { get; set; } = 30;
 }

@@ -475,6 +475,90 @@ public class StepToolsTests
 
     #endregion
 
+    #region Special Exception Tests
+
+    [Fact]
+    public async Task Run_WhenHandlerThrowsNonRetriableException_BubblesUp()
+    {
+        // Arrange
+        var steps = new Dictionary<string, object>();
+        var stepTools = new StepTools(steps, _jsonOptions);
+
+        // Act & Assert - NonRetriableException should bubble up, not be wrapped
+        var exception = await Assert.ThrowsAsync<Inngest.Exceptions.NonRetriableException>(async () =>
+        {
+            await stepTools.Run("non-retriable-step", () =>
+            {
+                throw new Inngest.Exceptions.NonRetriableException("Non-retriable error");
+            });
+        });
+
+        Assert.Equal("Non-retriable error", exception.Message);
+    }
+
+    [Fact]
+    public async Task Run_WhenHandlerThrowsRetryAfterException_BubblesUp()
+    {
+        // Arrange
+        var steps = new Dictionary<string, object>();
+        var stepTools = new StepTools(steps, _jsonOptions);
+
+        // Act & Assert - RetryAfterException should bubble up, not be wrapped
+        var exception = await Assert.ThrowsAsync<Inngest.Exceptions.RetryAfterException>(async () =>
+        {
+            await stepTools.Run("retry-after-step", () =>
+            {
+                throw new Inngest.Exceptions.RetryAfterException("Rate limited", TimeSpan.FromMinutes(5));
+            });
+        });
+
+        Assert.Equal("Rate limited", exception.Message);
+        Assert.Equal(TimeSpan.FromMinutes(5), exception.RetryAfter);
+    }
+
+    [Fact]
+    public async Task Run_Async_WhenHandlerThrowsNonRetriableException_BubblesUp()
+    {
+        // Arrange
+        var steps = new Dictionary<string, object>();
+        var stepTools = new StepTools(steps, _jsonOptions);
+
+        // Act & Assert - NonRetriableException should bubble up even with async handler
+        var exception = await Assert.ThrowsAsync<Inngest.Exceptions.NonRetriableException>(async () =>
+        {
+            await stepTools.Run("non-retriable-step", async () =>
+            {
+                await Task.Delay(1);
+                throw new Inngest.Exceptions.NonRetriableException("Async non-retriable error");
+            });
+        });
+
+        Assert.Equal("Async non-retriable error", exception.Message);
+    }
+
+    [Fact]
+    public async Task Run_RegularException_WrappedInStepError()
+    {
+        // Arrange - Verify that regular exceptions are still wrapped
+        var steps = new Dictionary<string, object>();
+        var stepTools = new StepTools(steps, _jsonOptions);
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<StepInterruptException>(async () =>
+        {
+            await stepTools.Run("error-step", () =>
+            {
+                throw new InvalidOperationException("Regular error");
+            });
+        });
+
+        Assert.Single(exception.Operations);
+        Assert.Equal(StepOpCode.StepError, exception.Operations[0].Op);
+        Assert.Equal("InvalidOperationException", exception.Operations[0].Error?.Name);
+    }
+
+    #endregion
+
     // Test helper classes
     private class TestData
     {

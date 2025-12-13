@@ -86,6 +86,14 @@ public class StepTools : IStepTools
         {
             throw; // Re-throw step interrupts
         }
+        catch (Exceptions.NonRetriableException)
+        {
+            throw; // Let non-retriable exceptions bubble up to be handled by InngestClient
+        }
+        catch (Exceptions.RetryAfterException)
+        {
+            throw; // Let retry-after exceptions bubble up to be handled by InngestClient
+        }
         catch (Exception ex)
         {
             // Report step error to Inngest
@@ -282,6 +290,14 @@ public class StepTools : IStepTools
         catch (StepInterruptException)
         {
             throw; // Re-throw step interrupts
+        }
+        catch (Exceptions.NonRetriableException)
+        {
+            throw; // Let non-retriable exceptions bubble up to be handled by InngestClient
+        }
+        catch (Exceptions.RetryAfterException)
+        {
+            throw; // Let retry-after exceptions bubble up to be handled by InngestClient
         }
         catch (Exception ex)
         {

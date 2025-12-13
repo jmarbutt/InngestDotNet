@@ -30,7 +30,7 @@ public class InngestClient : IInngestClient
     private readonly string _environment;
     private readonly bool _isDev;
     private readonly bool _disableCronTriggersInDev;
-    private readonly string _sdkVersion = "1.3.1";
+    private readonly string _sdkVersion = "1.3.4";
     private readonly string _appId;
     private readonly ILogger _logger;
     private readonly IInngestFunctionRegistry? _registry;
@@ -1215,6 +1215,23 @@ public class InngestClient : IInngestClient
             }
             catch (StepInterruptException stepEx)
             {
+                // Check if any operation is a StepError - that means a step failed and we should trigger retry
+                var stepError = stepEx.Operations.FirstOrDefault(op => op.Op == StepOpCode.StepError);
+                if (stepError != null)
+                {
+                    // Step failed - return 500 to trigger Inngest's retry mechanism
+                    _logger.LogError("Step {StepId} failed: {Error}", stepError.Id, stepError.Error?.Message);
+                    response.StatusCode = StatusCodes.Status500InternalServerError;
+                    response.Headers["X-Inngest-No-Retry"] = "false";
+                    await response.WriteAsJsonAsync(new
+                    {
+                        name = stepError.Error?.Name ?? "StepError",
+                        message = stepError.Error?.Message ?? "Step failed",
+                        stack = stepError.Error?.Stack
+                    }, _jsonOptions);
+                    return;
+                }
+
                 // Steps need to be scheduled - return 206 with operations
                 _logger.LogDebug("Function {FunctionId} requires step scheduling: {StepCount} operation(s)",
                     actualFunctionId, stepEx.Operations.Count);
