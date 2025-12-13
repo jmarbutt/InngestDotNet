@@ -29,7 +29,7 @@ public class InngestClient : IInngestClient
     private readonly Dictionary<string, string> _secrets = new();
     private readonly string _environment;
     private readonly bool _isDev;
-    private readonly string _sdkVersion = "1.2.4";
+    private readonly string _sdkVersion = "1.2.5";
     private readonly string _appId;
     private readonly ILogger _logger;
     private readonly IInngestFunctionRegistry? _registry;
@@ -397,18 +397,9 @@ public class InngestClient : IInngestClient
         // Normalize the key by removing the signkey-{env}- prefix
         var normalizedKey = NormalizeSigningKey(key);
 
-        // The key material is hex-encoded, decode it to bytes
-        // This must match how we sign responses (using Convert.FromHexString)
-        byte[] keyBytes;
-        try
-        {
-            keyBytes = Convert.FromHexString(normalizedKey);
-        }
-        catch (FormatException)
-        {
-            _logger.LogWarning("Signing key is not valid hex, falling back to UTF-8 encoding");
-            keyBytes = Encoding.UTF8.GetBytes(normalizedKey);
-        }
+        // Use the key as UTF-8 string bytes (this matches how other Inngest SDKs work)
+        // The JS SDK does: createHmac("sha256", key) where key is the string after prefix
+        var keyBytes = Encoding.UTF8.GetBytes(normalizedKey);
 
         using var hmac = new HMACSHA256(keyBytes);
         byte[] hashBytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(data));
@@ -813,17 +804,8 @@ public class InngestClient : IInngestClient
                 var normalizedKey = NormalizeSigningKey(_signingKey);
                 _logger.LogDebug("Response signing: key length after normalization = {KeyLen} chars", normalizedKey.Length);
 
-                byte[] keyBytes;
-                try
-                {
-                    keyBytes = Convert.FromHexString(normalizedKey);
-                    _logger.LogDebug("Response signing: using hex-decoded key ({ByteLen} bytes)", keyBytes.Length);
-                }
-                catch (FormatException ex)
-                {
-                    _logger.LogWarning(ex, "Signing key is not valid hex for response signing, falling back to UTF-8");
-                    keyBytes = Encoding.UTF8.GetBytes(normalizedKey);
-                }
+                // Use UTF-8 encoding for the key (matches how other Inngest SDKs work)
+                var keyBytes = Encoding.UTF8.GetBytes(normalizedKey);
 
                 using var hmac = new HMACSHA256(keyBytes);
                 var signatureBytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(dataToSign));
