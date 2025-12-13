@@ -311,17 +311,23 @@ public class StepToolsTests
 
         Assert.Single(exception.Operations);
         Assert.Equal("send-step", exception.Operations[0].Id);
-        Assert.Equal(StepOpCode.Step, exception.Operations[0].Op);
+        // SendEvent should use StepPlanned with proper opts for step.sendEvent
+        Assert.Equal(StepOpCode.StepPlanned, exception.Operations[0].Op);
+
+        // Verify the opts contain proper step type
+        var opts = exception.Operations[0].Opts as SendEventOpts;
+        Assert.NotNull(opts);
+        Assert.Equal("step.sendEvent", opts.Type);
     }
 
     [Fact]
     public async Task SendEvent_WhenMemoized_ReturnsEventIds()
     {
-        // Arrange
-        var eventIds = new[] { "evt-1", "evt-2" };
+        // Arrange - Inngest returns { ids: [...] } format, not raw string[]
+        var memoizedResult = new { ids = new[] { "evt-1", "evt-2" } };
         var steps = new Dictionary<string, object>
         {
-            ["send-step"] = JsonSerializer.SerializeToElement(eventIds, _jsonOptions)
+            ["send-step"] = JsonSerializer.SerializeToElement(memoizedResult, _jsonOptions)
         };
         var stepTools = new StepTools(steps, _jsonOptions);
 
@@ -334,6 +340,110 @@ public class StepToolsTests
         Assert.Equal("evt-1", result[0]);
         Assert.Equal("evt-2", result[1]);
     }
+
+    [Fact]
+    public async Task SendEvent_WhenMemoizedEmpty_ReturnsEmptyArray()
+    {
+        // Arrange - Inngest returns { ids: [] } for empty result
+        var memoizedResult = new { ids = Array.Empty<string>() };
+        var steps = new Dictionary<string, object>
+        {
+            ["send-step"] = JsonSerializer.SerializeToElement(memoizedResult, _jsonOptions)
+        };
+        var stepTools = new StepTools(steps, _jsonOptions);
+
+        // Act
+        var result = await stepTools.SendEvent("send-step",
+            new InngestEvent("test/event", new { }));
+
+        // Assert
+        Assert.Empty(result);
+    }
+
+    #region Executor Protocol V1/V2 Format Tests
+
+    [Fact]
+    public async Task Run_WhenMemoizedWithDataWrapper_DeserializesCorrectly()
+    {
+        // Arrange - V1/V2 executor sends { type: "data", data: <value> }
+        var wrappedResult = new { type = "data", data = "wrapped result" };
+        var steps = new Dictionary<string, object>
+        {
+            ["test-step"] = JsonSerializer.SerializeToElement(wrappedResult, _jsonOptions)
+        };
+        var stepTools = new StepTools(steps, _jsonOptions);
+
+        // Act
+        var result = await stepTools.Run("test-step", () => "ignored");
+
+        // Assert
+        Assert.Equal("wrapped result", result);
+    }
+
+    [Fact]
+    public async Task Run_WhenMemoizedWithComplexDataWrapper_DeserializesCorrectly()
+    {
+        // Arrange - V1/V2 executor sends complex objects wrapped
+        var complexData = new { name = "test", value = 123 };
+        var wrappedResult = new { type = "data", data = complexData };
+        var steps = new Dictionary<string, object>
+        {
+            ["test-step"] = JsonSerializer.SerializeToElement(wrappedResult, _jsonOptions)
+        };
+        var stepTools = new StepTools(steps, _jsonOptions);
+
+        // Act
+        var result = await stepTools.Run<TestData>("test-step", () => new TestData());
+
+        // Assert
+        Assert.NotNull(result);
+        Assert.Equal("test", result.Name);
+        Assert.Equal(123, result.Value);
+    }
+
+    [Fact]
+    public async Task WaitForEvent_WhenMemoizedWithDataWrapper_DeserializesCorrectly()
+    {
+        // Arrange - V1/V2 executor wraps waitForEvent results
+        var eventData = new TestEvent { Id = "evt-wrapped", Message = "wrapped event" };
+        var wrappedResult = new { type = "data", data = eventData };
+        var steps = new Dictionary<string, object>
+        {
+            ["wait-step"] = JsonSerializer.SerializeToElement(wrappedResult, _jsonOptions)
+        };
+        var stepTools = new StepTools(steps, _jsonOptions);
+
+        // Act
+        var result = await stepTools.WaitForEvent<TestEvent>("wait-step", new WaitForEventOptions
+        {
+            Event = "test/event",
+            Timeout = "1h"
+        });
+
+        // Assert
+        Assert.NotNull(result);
+        Assert.Equal("evt-wrapped", result.Id);
+        Assert.Equal("wrapped event", result.Message);
+    }
+
+    [Fact]
+    public async Task Run_WhenMemoizedWithRawValue_StillWorks()
+    {
+        // Arrange - V0 executor sends raw values (backward compatibility)
+        var steps = new Dictionary<string, object>
+        {
+            ["test-step"] = JsonSerializer.SerializeToElement("raw value", _jsonOptions)
+        };
+        var stepTools = new StepTools(steps, _jsonOptions);
+
+        // Act
+        var result = await stepTools.Run("test-step", () => "ignored");
+
+        // Assert
+        Assert.Equal("raw value", result);
+    }
+
+    #endregion
 
     // Test helper classes
     private class TestData

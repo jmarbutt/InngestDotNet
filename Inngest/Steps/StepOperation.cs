@@ -173,3 +173,21 @@ public class InvokeFunctionOpts
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Timeout { get; set; }
 }
+
+/// <summary>
+/// Options for SendEvent step operations
+/// </summary>
+public class SendEventOpts
+{
+    /// <summary>
+    /// The step type identifier for sendEvent operations
+    /// </summary>
+    [JsonPropertyName("type")]
+    public string Type { get; set; } = "step.sendEvent";
+
+    /// <summary>
+    /// The events to send
+    /// </summary>
+    [JsonPropertyName("ops")]
+    public object[]? Ops { get; set; }
+}

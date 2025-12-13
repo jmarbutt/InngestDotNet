@@ -157,7 +157,19 @@ public class StepTools : IStepTools
                 return Task.FromResult<T?>(null);
             }
 
-            return Task.FromResult(memoized.Deserialize<T>(_jsonOptions));
+            // Handle V1/V2 executor format: { type: "data", data: <event> }
+            var actualData = memoized;
+            if (memoized.ValueKind == JsonValueKind.Object && memoized.TryGetProperty("data", out var dataElement))
+            {
+                // Check if data is null (timeout in V1/V2 format)
+                if (dataElement.ValueKind == JsonValueKind.Null)
+                {
+                    return Task.FromResult<T?>(null);
+                }
+                actualData = dataElement;
+            }
+
+            return Task.FromResult(actualData.Deserialize<T>(_jsonOptions));
         }
 
         throw new StepInterruptException(new StepOperation
@@ -229,9 +241,8 @@ public class StepTools : IStepTools
     {
         if (_memoizedSteps.TryGetValue(id, out var memoized))
         {
-            return Task.FromResult(
-                memoized.Deserialize<string[]>(_jsonOptions) ?? Array.Empty<string>()
-            );
+            // Inngest returns { ids: string[] } format
+            return Task.FromResult(DeserializeSendEventResult(memoized));
         }
 
         // Prepare events for sending
@@ -247,9 +258,33 @@ public class StepTools : IStepTools
         throw new StepInterruptException(new StepOperation
         {
             Id = id,
-            Op = StepOpCode.Step,
-            Data = eventPayloads
+            Op = StepOpCode.StepPlanned,
+            Opts = new SendEventOpts
+            {
+                Type = "step.sendEvent",
+                Ops = eventPayloads
+            }
         });
+    }
+
+    /// <summary>
+    /// Deserialize the SendEvent memoized result which comes as { ids: string[] }
+    /// </summary>
+    private string[] DeserializeSendEventResult(JsonElement element)
+    {
+        // Inngest returns { ids: [...] } format
+        if (element.ValueKind == JsonValueKind.Object && element.TryGetProperty("ids", out var idsElement))
+        {
+            return idsElement.Deserialize<string[]>(_jsonOptions) ?? Array.Empty<string>();
+        }
+
+        // Fallback: try to deserialize directly as string[] for backward compatibility
+        if (element.ValueKind == JsonValueKind.Array)
+        {
+            return element.Deserialize<string[]>(_jsonOptions) ?? Array.Empty<string>();
+        }
+
+        return Array.Empty<string>();
     }
 
     /// <summary>
