@@ -295,11 +295,20 @@ public class StepToolsTests
     }
 
     [Fact]
-    public async Task SendEvent_WhenNotMemoized_ThrowsStepInterruptException()
+    public async Task SendEvent_WhenNotMemoized_SendsEventsAndReturnsStepRun()
     {
         // Arrange
         var steps = new Dictionary<string, object>();
-        var stepTools = new StepTools(steps, _jsonOptions);
+        var sentEvents = new List<InngestEvent>();
+
+        // Mock event sender that captures events and returns IDs
+        Task<string[]> mockSendEvents(InngestEvent[] events)
+        {
+            sentEvents.AddRange(events);
+            return Task.FromResult(events.Select((_, i) => $"evt-{i + 1}").ToArray());
+        }
+
+        var stepTools = new StepTools(steps, _jsonOptions, mockSendEvents);
 
         // Act & Assert
         var exception = await Assert.ThrowsAsync<StepInterruptException>(async () =>
@@ -309,15 +318,36 @@ public class StepToolsTests
                 new InngestEvent("email/send", new { to = "test@example.com" }));
         });
 
+        // Verify events were sent
+        Assert.Equal(2, sentEvents.Count);
+        Assert.Equal("user/created", sentEvents[0].Name);
+        Assert.Equal("email/send", sentEvents[1].Name);
+
+        // Verify the step operation format
         Assert.Single(exception.Operations);
         Assert.Equal("send-step", exception.Operations[0].Id);
-        // SendEvent should use StepPlanned with proper opts for step.sendEvent
-        Assert.Equal(StepOpCode.StepPlanned, exception.Operations[0].Op);
+        Assert.Equal(StepOpCode.StepRun, exception.Operations[0].Op);
+        Assert.Equal("sendEvent", exception.Operations[0].Name);
 
-        // Verify the opts contain proper step type
-        var opts = exception.Operations[0].Opts as SendEventOpts;
-        Assert.NotNull(opts);
-        Assert.Equal("step.sendEvent", opts.Type);
+        // Verify the data contains the event IDs
+        var data = exception.Operations[0].Data;
+        Assert.NotNull(data);
+    }
+
+    [Fact]
+    public async Task SendEvent_WithoutEventSender_ThrowsInvalidOperationException()
+    {
+        // Arrange - no event sender delegate
+        var steps = new Dictionary<string, object>();
+        var stepTools = new StepTools(steps, _jsonOptions);
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        {
+            await stepTools.SendEvent("send-step", new InngestEvent("test/event", new { }));
+        });
+
+        Assert.Contains("event sender delegate", exception.Message);
     }
 
     [Fact]

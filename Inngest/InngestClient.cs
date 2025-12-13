@@ -243,6 +243,17 @@ public class InngestClient : IInngestClient
     /// </summary>
     public async Task<bool> SendEventsAsync(IEnumerable<InngestEvent> events)
     {
+        var ids = await SendEventsWithIdsAsync(events);
+        return ids.Length > 0;
+    }
+
+    /// <summary>
+    /// Send multiple events to Inngest and return their IDs
+    /// </summary>
+    /// <param name="events">Events to send</param>
+    /// <returns>Array of event IDs that were created</returns>
+    public async Task<string[]> SendEventsWithIdsAsync(IEnumerable<InngestEvent> events)
+    {
         // Ensure required fields for all events
         var payload = events.Select(evt =>
         {
@@ -256,7 +267,35 @@ public class InngestClient : IInngestClient
         var content = new StringContent(JsonSerializer.Serialize(payload, _jsonOptions), Encoding.UTF8, "application/json");
         var response = await _httpClient.PostAsync($"{_eventApiOrigin}/e/{effectiveEventKey}", content);
 
-        return response.IsSuccessStatusCode;
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorBody = await response.Content.ReadAsStringAsync();
+            _logger.LogWarning("Failed to send events: {StatusCode} - {Body}", response.StatusCode, errorBody);
+            return Array.Empty<string>();
+        }
+
+        // Parse response to get event IDs
+        try
+        {
+            var responseBody = await response.Content.ReadAsStringAsync();
+            var responseData = JsonSerializer.Deserialize<SendEventResponse>(responseBody, _jsonOptions);
+            return responseData?.Ids ?? Array.Empty<string>();
+        }
+        catch (JsonException ex)
+        {
+            _logger.LogWarning(ex, "Failed to parse event response");
+            // Fallback: return the IDs we generated
+            return payload.Select(e => e.Id!).ToArray();
+        }
+    }
+
+    /// <summary>
+    /// Response from Inngest event API
+    /// </summary>
+    private class SendEventResponse
+    {
+        [System.Text.Json.Serialization.JsonPropertyName("ids")]
+        public string[]? Ids { get; set; }
     }
 
     /// <summary>
@@ -1141,7 +1180,11 @@ public class InngestClient : IInngestClient
             int attempt = payload.Ctx?.Attempt ?? 0;
 
             // Create step tools with memoized state from Inngest
-            var stepTools = new StepTools(payload.Steps, _jsonOptions);
+            // Pass the event sender delegate so step.sendEvent can actually send events
+            var stepTools = new StepTools(
+                payload.Steps,
+                _jsonOptions,
+                async (events) => await SendEventsWithIdsAsync(events));
 
             // Create the execution context
             var inngestContext = new InngestContext(

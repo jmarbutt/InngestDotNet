@@ -69,6 +69,13 @@ public class StepOperation
     public string? DisplayName { get; set; }
 
     /// <summary>
+    /// The step type name (e.g., "sendEvent" for step.sendEvent)
+    /// </summary>
+    [JsonPropertyName("name")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Name { get; set; }
+
+    /// <summary>
     /// Error information if the step failed
     /// </summary>
     [JsonPropertyName("error")]

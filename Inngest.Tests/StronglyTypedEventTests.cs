@@ -56,7 +56,7 @@ public class StronglyTypedEventTests
     {
         // Arrange
         var handler = new MockHttpMessageHandler();
-        handler.QueueResponse(HttpStatusCode.OK, "{}");
+        handler.QueueResponse(HttpStatusCode.OK, "{\"ids\":[\"evt-1\"]}");
 
         var httpClient = new HttpClient(handler);
         var client = new InngestClient(
@@ -90,7 +90,7 @@ public class StronglyTypedEventTests
     {
         // Arrange
         var handler = new MockHttpMessageHandler();
-        handler.QueueResponse(HttpStatusCode.OK, "{}");
+        handler.QueueResponse(HttpStatusCode.OK, "{\"ids\":[\"evt-1\"]}");
 
         var httpClient = new HttpClient(handler);
         var client = new InngestClient(
@@ -123,7 +123,7 @@ public class StronglyTypedEventTests
     {
         // Arrange
         var handler = new MockHttpMessageHandler();
-        handler.QueueResponse(HttpStatusCode.OK, "{}");
+        handler.QueueResponse(HttpStatusCode.OK, "{\"ids\":[\"evt-1\"]}");
 
         var httpClient = new HttpClient(handler);
         var client = new InngestClient(
@@ -161,7 +161,7 @@ public class StronglyTypedEventTests
     {
         // Arrange
         var handler = new MockHttpMessageHandler();
-        handler.QueueResponse(HttpStatusCode.OK, "{}");
+        handler.QueueResponse(HttpStatusCode.OK, "{\"ids\":[\"evt-1\"]}");
 
         var httpClient = new HttpClient(handler);
         var client = new InngestClient(

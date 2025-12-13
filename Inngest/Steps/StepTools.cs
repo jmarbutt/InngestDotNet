@@ -3,6 +3,13 @@ using System.Text.Json;
 namespace Inngest.Steps;
 
 /// <summary>
+/// Delegate for sending events to Inngest
+/// </summary>
+/// <param name="events">Events to send</param>
+/// <returns>Array of event IDs that were created</returns>
+public delegate Task<string[]> SendEventsDelegate(InngestEvent[] events);
+
+/// <summary>
 /// Implementation of step tools for Inngest function execution.
 ///
 /// This class handles the core step execution protocol:
@@ -18,15 +25,18 @@ public class StepTools : IStepTools
 {
     private readonly Dictionary<string, JsonElement> _memoizedSteps;
     private readonly JsonSerializerOptions _jsonOptions;
+    private readonly SendEventsDelegate? _sendEvents;
 
     /// <summary>
     /// Creates a new StepTools instance with memoized step results
     /// </summary>
     /// <param name="steps">Dictionary of step ID to result from Inngest</param>
     /// <param name="jsonOptions">JSON serialization options</param>
-    public StepTools(Dictionary<string, object>? steps, JsonSerializerOptions jsonOptions)
+    /// <param name="sendEvents">Optional delegate to send events (required for SendEvent step)</param>
+    public StepTools(Dictionary<string, object>? steps, JsonSerializerOptions jsonOptions, SendEventsDelegate? sendEvents = null)
     {
         _jsonOptions = jsonOptions;
+        _sendEvents = sendEvents;
 
         // Convert the steps dictionary to JsonElement for type-safe deserialization
         _memoizedSteps = new Dictionary<string, JsonElement>();
@@ -237,34 +247,53 @@ public class StepTools : IStepTools
     }
 
     /// <inheritdoc/>
-    public Task<string[]> SendEvent(string id, params InngestEvent[] events)
+    public async Task<string[]> SendEvent(string id, params InngestEvent[] events)
     {
         if (_memoizedSteps.TryGetValue(id, out var memoized))
         {
-            // Inngest returns { ids: string[] } format
-            return Task.FromResult(DeserializeSendEventResult(memoized));
+            // Inngest returns { ids: string[] } format or direct array
+            return DeserializeSendEventResult(memoized);
         }
 
-        // Prepare events for sending
-        var eventPayloads = events.Select(e => new
+        // SendEvent is a "sync" step - we execute it immediately and return the result
+        // This matches the TypeScript SDK behavior where sendEvent runs synchronously
+        if (_sendEvents == null)
         {
-            name = e.Name,
-            data = e.Data,
-            user = e.User,
-            id = e.Id ?? Guid.NewGuid().ToString(),
-            ts = e.Timestamp
-        }).ToArray();
+            throw new InvalidOperationException(
+                "SendEvent step requires an event sender delegate. " +
+                "Ensure the InngestClient is properly configured.");
+        }
 
-        throw new StepInterruptException(new StepOperation
+        try
         {
-            Id = id,
-            Op = StepOpCode.StepPlanned,
-            Opts = new SendEventOpts
+            // Actually send the events to Inngest
+            var eventIds = await _sendEvents(events);
+
+            // Return the result as a StepRun operation (like step.run does)
+            // This tells Inngest to memoize the result
+            throw new StepInterruptException(new StepOperation
             {
-                Type = "step.sendEvent",
-                Ops = eventPayloads
-            }
-        });
+                Id = id,
+                Op = StepOpCode.StepRun,
+                Name = "sendEvent",
+                Data = new { ids = eventIds }
+            });
+        }
+        catch (StepInterruptException)
+        {
+            throw; // Re-throw step interrupts
+        }
+        catch (Exception ex)
+        {
+            // Report step error to Inngest
+            throw new StepInterruptException(new StepOperation
+            {
+                Id = id,
+                Op = StepOpCode.StepError,
+                Name = "sendEvent",
+                Error = StepError.FromException(ex)
+            });
+        }
     }
 
     /// <summary>
