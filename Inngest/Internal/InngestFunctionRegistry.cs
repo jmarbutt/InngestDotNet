@@ -93,17 +93,6 @@ internal sealed class InngestFunctionRegistry : IInngestFunctionRegistry
         if (functionAttr == null)
             return null;
 
-        // Get triggers
-        var triggers = GetTriggers(functionType);
-        if (triggers.Length == 0)
-        {
-            // Default to event trigger with function ID as event name
-            triggers = new[] { FunctionTrigger.CreateEventTrigger(functionAttr.Id) };
-        }
-
-        // Get options from attributes
-        var options = GetFunctionOptions(functionType);
-
         // Determine event data type for typed handlers
         Type? eventDataType = null;
         var typedInterface = functionType.GetInterfaces()
@@ -112,6 +101,17 @@ internal sealed class InngestFunctionRegistry : IInngestFunctionRegistry
         {
             eventDataType = typedInterface.GetGenericArguments()[0];
         }
+
+        // Get triggers - pass event data type for auto-derivation
+        var triggers = GetTriggers(functionType, eventDataType);
+        if (triggers.Length == 0)
+        {
+            // Default to event trigger with function ID as event name
+            triggers = new[] { FunctionTrigger.CreateEventTrigger(functionAttr.Id) };
+        }
+
+        // Get options from attributes
+        var options = GetFunctionOptions(functionType);
 
         return new FunctionRegistration
         {
@@ -124,11 +124,11 @@ internal sealed class InngestFunctionRegistry : IInngestFunctionRegistry
         };
     }
 
-    private static FunctionTrigger[] GetTriggers(Type functionType)
+    private static FunctionTrigger[] GetTriggers(Type functionType, Type? eventDataType)
     {
         var triggers = new List<FunctionTrigger>();
 
-        // Event triggers
+        // Event triggers from attributes
         var eventTriggers = functionType.GetCustomAttributes<EventTriggerAttribute>();
         foreach (var et in eventTriggers)
         {
@@ -147,7 +147,46 @@ internal sealed class InngestFunctionRegistry : IInngestFunctionRegistry
             triggers.Add(FunctionTrigger.CreateCronTrigger(ct.Cron));
         }
 
+        // Auto-derive event trigger from IInngestFunction<T> when T implements IInngestEventData
+        // or has [InngestEvent] attribute, but only if no explicit [EventTrigger] was specified
+        if (triggers.Count == 0 && eventDataType != null)
+        {
+            var derivedEventName = TryGetEventNameFromType(eventDataType);
+            if (derivedEventName != null)
+            {
+                triggers.Add(FunctionTrigger.CreateEventTrigger(derivedEventName));
+            }
+        }
+
         return triggers.ToArray();
+    }
+
+    /// <summary>
+    /// Attempts to get the event name from a type that implements IInngestEventData
+    /// or is decorated with [InngestEvent].
+    /// </summary>
+    private static string? TryGetEventNameFromType(Type eventDataType)
+    {
+        // Check for IInngestEventData implementation (static abstract EventName property)
+        if (typeof(IInngestEventData).IsAssignableFrom(eventDataType))
+        {
+            var property = eventDataType.GetProperty("EventName", BindingFlags.Public | BindingFlags.Static);
+            if (property != null)
+            {
+                var value = property.GetValue(null) as string;
+                if (!string.IsNullOrEmpty(value))
+                    return value;
+            }
+        }
+
+        // Check for [InngestEvent] attribute
+        var eventAttr = eventDataType.GetCustomAttribute<InngestEventAttribute>();
+        if (eventAttr != null)
+        {
+            return eventAttr.Name;
+        }
+
+        return null;
     }
 
     private static FunctionOptions? GetFunctionOptions(Type functionType)

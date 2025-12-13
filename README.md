@@ -87,36 +87,49 @@ public class OrderProcessor : IInngestFunction
 }
 ```
 
-### 3. Strongly-Typed Event Data
+### 3. Strongly-Typed Events (No Magic Strings!)
+
+Define events that know their own name using `IInngestEventData`:
 
 ```csharp
-public class OrderCreatedEvent
+// Event definition - the event name lives with the event type
+public record OrderCreatedEvent : IInngestEventData
 {
-    public string? OrderId { get; set; }
-    public decimal Amount { get; set; }
-    public string? CustomerId { get; set; }
+    public static string EventName => "shop/order.created";
+
+    public required string OrderId { get; init; }
+    public required decimal Amount { get; init; }
+    public required string CustomerId { get; init; }
 }
 
-[InngestFunction("typed-order-handler", Name = "Typed Order Handler")]
-[EventTrigger("shop/order.created")]
-public class TypedOrderHandler : IInngestFunction<OrderCreatedEvent>
+// Function - NO [EventTrigger] needed! Trigger auto-derived from OrderCreatedEvent.EventName
+[InngestFunction("order-handler", Name = "Order Handler")]
+public class OrderHandler : IInngestFunction<OrderCreatedEvent>
 {
     public async Task<object?> ExecuteAsync(
         InngestContext<OrderCreatedEvent> context,
         CancellationToken cancellationToken)
     {
-        // Access strongly-typed event data
-        var eventData = context.Event.Data;
+        // Fully typed event data - no nulls, no magic strings
+        var eventData = context.Event.Data!;
 
         await context.Step.Run("process", () =>
         {
-            Console.WriteLine($"Order {eventData?.OrderId} for ${eventData?.Amount}");
+            Console.WriteLine($"Order {eventData.OrderId} for ${eventData.Amount}");
             return true;
         });
 
         return new { processed = true };
     }
 }
+
+// Sending events - type-safe, event name derived automatically
+await inngestClient.SendAsync(new OrderCreatedEvent
+{
+    OrderId = "123",
+    Amount = 99.99m,
+    CustomerId = "cust-456"
+});
 ```
 
 ## Function Attributes
@@ -183,7 +196,8 @@ Limits execution rate:
   "Inngest": {
     "AppId": "my-app",
     "EventKey": "your-event-key",
-    "SigningKey": "your-signing-key"
+    "SigningKey": "your-signing-key",
+    "DisableCronTriggersInDev": true  // Optional: prevent cron jobs locally
   }
 }
 
@@ -203,6 +217,7 @@ builder.Services
         options.EventKey = "your-event-key";
         options.SigningKey = "your-signing-key";
         options.IsDev = builder.Environment.IsDevelopment();
+        options.DisableCronTriggersInDev = true; // Prevent cron jobs from running locally
     })
     .AddFunction<OrderProcessor>()
     .AddFunction<EmailSender>();
@@ -217,13 +232,24 @@ builder.Services
 | `INNGEST_SIGNING_KEY_FALLBACK` | Optional fallback signing key |
 | `INNGEST_ENV` | Environment name (e.g., "production", "staging") |
 | `INNGEST_DEV` | Set to any value or URL to use Inngest Dev Server |
+| `INNGEST_DISABLE_CRON_IN_DEV` | Set to `true` or `1` to disable cron triggers in dev mode |
 | `INNGEST_SERVE_ORIGIN` | Base URL for your application |
 | `INNGEST_SERVE_PATH` | Path for the Inngest endpoint |
 
 ## Sending Events
 
+### Strongly-Typed Events (Recommended)
+
 ```csharp
-// Inject IInngestClient where needed
+// Define your event with IInngestEventData
+public record OrderCreatedEvent : IInngestEventData
+{
+    public static string EventName => "shop/order.created";
+    public required string OrderId { get; init; }
+    public required decimal Amount { get; init; }
+}
+
+// Send with full type safety - no magic strings!
 public class OrderController : ControllerBase
 {
     private readonly IInngestClient _inngest;
@@ -233,22 +259,40 @@ public class OrderController : ControllerBase
     [HttpPost]
     public async Task<IActionResult> CreateOrder(Order order)
     {
-        // Simple event
-        await _inngest.SendEventAsync("shop/order.created", new {
-            orderId = order.Id,
-            amount = order.Total
+        // Strongly-typed - event name derived from OrderCreatedEvent.EventName
+        await _inngest.SendAsync(new OrderCreatedEvent
+        {
+            OrderId = order.Id,
+            Amount = order.Total
         });
 
-        // Event with metadata
-        var evt = new InngestEvent("shop/order.created", new { orderId = order.Id })
-            .WithUser(new { id = order.CustomerId })
-            .WithIdempotencyKey($"order-{order.Id}");
-
-        await _inngest.SendEventAsync(evt);
+        // With additional configuration
+        await _inngest.SendAsync(new OrderCreatedEvent
+        {
+            OrderId = order.Id,
+            Amount = order.Total
+        }, evt => evt.WithIdempotencyKey($"order-{order.Id}"));
 
         return Ok();
     }
 }
+```
+
+### Untyped Events (Legacy)
+
+```csharp
+// Simple event with magic string
+await _inngest.SendEventAsync("shop/order.created", new {
+    orderId = order.Id,
+    amount = order.Total
+});
+
+// Event with metadata
+var evt = new InngestEvent("shop/order.created", new { orderId = order.Id })
+    .WithUser(new { id = order.CustomerId })
+    .WithIdempotencyKey($"order-{order.Id}");
+
+await _inngest.SendEventAsync(evt);
 ```
 
 ## Step Primitives

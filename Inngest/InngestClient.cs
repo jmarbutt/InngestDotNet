@@ -29,7 +29,8 @@ public class InngestClient : IInngestClient
     private readonly Dictionary<string, string> _secrets = new();
     private readonly string _environment;
     private readonly bool _isDev;
-    private readonly string _sdkVersion = "1.2.5";
+    private readonly bool _disableCronTriggersInDev;
+    private readonly string _sdkVersion = "1.3.0";
     private readonly string _appId;
     private readonly ILogger _logger;
     private readonly IInngestFunctionRegistry? _registry;
@@ -61,6 +62,12 @@ public class InngestClient : IInngestClient
         _environment = Environment.GetEnvironmentVariable("INNGEST_ENV") ?? "dev";
         _isDev = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("INNGEST_DEV"));
         _appId = appId ?? Environment.GetEnvironmentVariable("INNGEST_APP_ID") ?? "inngest-dotnet";
+
+        // Check for disable cron in dev from environment variable
+        var disableCronEnv = Environment.GetEnvironmentVariable("INNGEST_DISABLE_CRON_IN_DEV");
+        _disableCronTriggersInDev = !string.IsNullOrEmpty(disableCronEnv) &&
+            (disableCronEnv.Equals("true", StringComparison.OrdinalIgnoreCase) ||
+             disableCronEnv.Equals("1", StringComparison.OrdinalIgnoreCase));
         _logger = logger ?? NullLogger.Instance;
 
         // Set API endpoints based on dev mode and environment variables
@@ -112,6 +119,7 @@ public class InngestClient : IInngestClient
         _signingKeyFallback = options.SigningKeyFallback;
         _environment = options.Environment ?? "dev";
         _isDev = options.IsDev ?? false;
+        _disableCronTriggersInDev = options.DisableCronTriggersInDev;
         _appId = options.AppId ?? "inngest-app";
 
         // Set API endpoints
@@ -219,8 +227,8 @@ public class InngestClient : IInngestClient
     {
         // Ensure required fields
         evt.Id ??= Guid.NewGuid().ToString();
-        
-        var payload = new { events = new[] { evt } };
+
+        var payload = new[] { evt };
         var content = new StringContent(JsonSerializer.Serialize(payload, _jsonOptions), Encoding.UTF8, "application/json");
         var response = await _httpClient.PostAsync($"{_eventApiOrigin}/e/{_eventKey}", content);
 
@@ -233,13 +241,12 @@ public class InngestClient : IInngestClient
     public async Task<bool> SendEventsAsync(IEnumerable<InngestEvent> events)
     {
         // Ensure required fields for all events
-        var eventsArray = events.Select(evt =>
+        var payload = events.Select(evt =>
         {
             evt.Id ??= Guid.NewGuid().ToString();
             return evt;
         }).ToArray();
-        
-        var payload = new { events = eventsArray };
+
         var content = new StringContent(JsonSerializer.Serialize(payload, _jsonOptions), Encoding.UTF8, "application/json");
         var response = await _httpClient.PostAsync($"{_eventApiOrigin}/e/{_eventKey}", content);
 
@@ -526,6 +533,13 @@ public class InngestClient : IInngestClient
         // Build up the list of functions to register
         var fnArray = new List<object>();
 
+        // Determine if cron triggers should be skipped
+        var skipCronTriggers = _isDev && _disableCronTriggersInDev;
+        if (skipCronTriggers)
+        {
+            _logger.LogInformation("Cron triggers disabled in dev mode (DisableCronTriggersInDev=true)");
+        }
+
         foreach (var fn in _functions.Values)
         {
             var triggers = new List<object>();
@@ -533,6 +547,14 @@ public class InngestClient : IInngestClient
             {
                 if (trigger.Event.StartsWith("cron(") && trigger.Event.EndsWith(")"))
                 {
+                    // Skip cron triggers in dev mode if configured
+                    if (skipCronTriggers)
+                    {
+                        _logger.LogDebug("Skipping cron trigger for function {FunctionId}: {CronExpression}",
+                            fn.Id, trigger.Event);
+                        continue;
+                    }
+
                     // Handle cron triggers
                     var cronExpression = trigger.Event.Substring(5, trigger.Event.Length - 6);
                     triggers.Add(new { cron = cronExpression });
@@ -550,6 +572,13 @@ public class InngestClient : IInngestClient
 
                     triggers.Add(triggerObj);
                 }
+            }
+
+            // Skip functions that have no triggers (e.g., cron-only functions when crons are disabled)
+            if (triggers.Count == 0)
+            {
+                _logger.LogDebug("Skipping function {FunctionId} - no triggers remaining after filtering", fn.Id);
+                continue;
             }
 
             // Build step definitions - use registered steps if any, otherwise default single step

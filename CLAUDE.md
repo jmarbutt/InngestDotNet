@@ -88,6 +88,7 @@ dotnet run --project InngestExample
 | `INNGEST_EVENT_KEY` | Event key for sending events |
 | `INNGEST_SIGNING_KEY` | Signing key for request verification |
 | `INNGEST_DEV` | Enable dev mode (set to `true` or dev server URL) |
+| `INNGEST_DISABLE_CRON_IN_DEV` | Disable cron triggers in dev mode (set to `true` or `1`) |
 | `INNGEST_SERVE_ORIGIN` | Base URL for Inngest to reach this service |
 | `INNGEST_SERVE_PATH` | Path for the Inngest endpoint |
 | `INNGEST_API_BASE_URL` | Override Inngest API URL |

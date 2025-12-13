@@ -1,35 +1,17 @@
 using Inngest;
 using Inngest.Attributes;
 using Inngest.Steps;
+using InngestExample.Events;
 
 namespace InngestExample.Functions;
 
 /// <summary>
-/// Event data for order created events
-/// </summary>
-public class OrderCreatedEvent
-{
-    public string? OrderId { get; set; }
-    public decimal Amount { get; set; }
-    public string? CustomerId { get; set; }
-}
-
-/// <summary>
-/// Payment confirmation event data
-/// </summary>
-public class PaymentConfirmation
-{
-    public string? OrderId { get; set; }
-    public string? TransactionId { get; set; }
-    public decimal Amount { get; set; }
-    public bool Success { get; set; }
-}
-
-/// <summary>
-/// Example multi-step workflow demonstrating durable execution with strongly-typed events
+/// Example multi-step workflow demonstrating durable execution with strongly-typed events.
+///
+/// Note: No [EventTrigger] attribute needed! The trigger is automatically derived from
+/// OrderCreatedEvent.EventName because OrderCreatedEvent implements IInngestEventData.
 /// </summary>
 [InngestFunction("order-workflow", Name = "Process Order Workflow")]
-[EventTrigger("shop/order.created")]
 [Retry(Attempts = 5)]
 public class OrderWorkflowFunction : IInngestFunction<OrderCreatedEvent>
 {
@@ -42,16 +24,15 @@ public class OrderWorkflowFunction : IInngestFunction<OrderCreatedEvent>
 
     public async Task<object?> ExecuteAsync(InngestContext<OrderCreatedEvent> context, CancellationToken cancellationToken)
     {
-        // Access strongly-typed event data
-        var eventData = context.Event.Data;
+        // Access strongly-typed event data - fully typed, no magic strings!
+        var eventData = context.Event.Data!;
         _logger.LogInformation("Processing order {OrderId} for customer {CustomerId}",
-            eventData?.OrderId, eventData?.CustomerId);
+            eventData.OrderId, eventData.CustomerId);
 
         // Step 1: Validate order
         var order = await context.Step.Run("validate-order", () =>
         {
-            var orderId = eventData?.OrderId ?? Guid.NewGuid().ToString();
-            return new { orderId, status = "validated", amount = eventData?.Amount ?? 99.99m };
+            return new { orderId = eventData.OrderId, status = "validated", amount = eventData.Amount };
         });
 
         // Step 2: Reserve inventory
@@ -69,11 +50,12 @@ public class OrderWorkflowFunction : IInngestFunction<OrderCreatedEvent>
         });
 
         // Step 4: Wait for payment webhook (with timeout)
-        var confirmation = await context.Step.WaitForEvent<PaymentConfirmation>(
+        // Uses PaymentConfirmedEvent.EventName for type safety
+        var confirmation = await context.Step.WaitForEvent<PaymentConfirmedEvent>(
             "wait-payment-confirmation",
             new WaitForEventOptions
             {
-                Event = "stripe/payment.succeeded",
+                Event = PaymentConfirmedEvent.EventName, // Type-safe event name!
                 Timeout = "1h",
                 Match = "async.data.orderId == event.data.orderId"
             });

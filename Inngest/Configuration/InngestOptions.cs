@@ -78,6 +78,14 @@ public class InngestOptions
     public string? ServePath { get; set; }
 
     /// <summary>
+    /// When true, cron triggers are excluded from function registration in dev mode.
+    /// This prevents scheduled functions from running during local development.
+    /// Falls back to INNGEST_DISABLE_CRON_IN_DEV environment variable.
+    /// Defaults to false for backward compatibility.
+    /// </summary>
+    public bool DisableCronTriggersInDev { get; set; } = false;
+
+    /// <summary>
     /// Validates the configuration and throws if invalid
     /// </summary>
     internal void Validate()
@@ -136,5 +144,14 @@ public class InngestOptions
         IsDev ??= false;
 
         DevServerUrl ??= "http://localhost:8288";
+
+        // Check for disable cron in dev mode - only apply env var if not explicitly set
+        var disableCronEnv = System.Environment.GetEnvironmentVariable("INNGEST_DISABLE_CRON_IN_DEV");
+        if (!string.IsNullOrEmpty(disableCronEnv) &&
+            (disableCronEnv.Equals("true", StringComparison.OrdinalIgnoreCase) ||
+             disableCronEnv.Equals("1", StringComparison.OrdinalIgnoreCase)))
+        {
+            DisableCronTriggersInDev = true;
+        }
     }
 }

@@ -1,5 +1,5 @@
 using Inngest;
-using InngestExample.Functions;
+using InngestExample.Events;
 using Microsoft.AspNetCore.Mvc;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -35,7 +35,7 @@ app.UseHttpsRedirection();
 // API Endpoints
 // =============================================================================
 
-// Trigger an event
+// Trigger an event (legacy - with magic strings)
 app.MapPost("/api/trigger-event", async ([FromServices] IInngestClient inngestClient, [FromBody] EventRequest request) =>
 {
     if (string.IsNullOrEmpty(request.EventName))
@@ -57,6 +57,30 @@ app.MapPost("/api/trigger-event", async ([FromServices] IInngestClient inngestCl
 .WithName("TriggerEvent")
 .WithOpenApi();
 
+// Create an order (strongly-typed - no magic strings!)
+app.MapPost("/api/orders", async ([FromServices] IInngestClient inngestClient, [FromBody] CreateOrderRequest request) =>
+{
+    // Create the strongly-typed event - the event name is defined in OrderCreatedEvent.EventName
+    var orderEvent = new OrderCreatedEvent
+    {
+        OrderId = Guid.NewGuid().ToString(),
+        Amount = request.Amount,
+        CustomerId = request.CustomerId
+    };
+
+    // SendAsync<T> automatically uses OrderCreatedEvent.EventName ("shop/order.created")
+    var result = await inngestClient.SendAsync(orderEvent);
+
+    return Results.Ok(new
+    {
+        success = result,
+        orderId = orderEvent.OrderId,
+        eventName = OrderCreatedEvent.EventName // Shows the event name for debugging
+    });
+})
+.WithName("CreateOrder")
+.WithOpenApi();
+
 // Health check
 app.MapGet("/health", () => Results.Ok(new { status = "healthy", timestamp = DateTime.UtcNow }))
 .WithName("HealthCheck")
@@ -76,4 +100,10 @@ public class EventRequest
     public required string EventName { get; set; }
     public object? Data { get; set; }
     public string? UserId { get; set; }
+}
+
+public class CreateOrderRequest
+{
+    public required decimal Amount { get; set; }
+    public required string CustomerId { get; set; }
 }
