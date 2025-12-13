@@ -8,14 +8,15 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-// Configure Inngest with the new pattern
+// Configure Inngest
+// Set INNGEST_DEV=true for local development, or INNGEST_DEV=false for production mode
+// Set INNGEST_SIGNING_KEY and INNGEST_EVENT_KEY for production
 builder.Services
     .AddInngest(options =>
     {
         options.AppId = "my-dotnet-app";
-        options.IsDev = true;
-        options.ApiOrigin = "http://127.0.0.1:8288";
-        options.EventApiOrigin = "http://127.0.0.1:8288";
+        // IsDev, SigningKey, EventKey, ApiOrigin, EventApiOrigin
+        // are all read from environment variables if not set here
     })
     .AddFunctionsFromAssembly(typeof(Program).Assembly);
 

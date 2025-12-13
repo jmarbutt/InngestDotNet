@@ -29,7 +29,7 @@ public class InngestClient : IInngestClient
     private readonly Dictionary<string, string> _secrets = new();
     private readonly string _environment;
     private readonly bool _isDev;
-    private readonly string _sdkVersion = "1.2.0";
+    private readonly string _sdkVersion = "1.2.1";
     private readonly string _appId;
     private readonly ILogger _logger;
     private readonly IInngestFunctionRegistry? _registry;
@@ -111,7 +111,7 @@ public class InngestClient : IInngestClient
         _signingKey = options.SigningKey ?? "";
         _signingKeyFallback = options.SigningKeyFallback;
         _environment = options.Environment ?? "dev";
-        _isDev = options.IsDev;
+        _isDev = options.IsDev ?? false;
         _appId = options.AppId ?? "inngest-app";
 
         // Set API endpoints

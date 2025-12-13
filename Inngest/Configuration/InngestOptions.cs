@@ -54,8 +54,9 @@ public class InngestOptions
     /// <summary>
     /// Enable dev mode for local development
     /// Falls back to INNGEST_DEV environment variable
+    /// Set to false explicitly to force production mode even locally
     /// </summary>
-    public bool IsDev { get; set; }
+    public bool? IsDev { get; set; }
 
     /// <summary>
     /// Dev server URL when IsDev is true
@@ -82,7 +83,7 @@ public class InngestOptions
     internal void Validate()
     {
         // AppId is required when not in dev mode
-        if (string.IsNullOrEmpty(AppId) && !IsDev)
+        if (string.IsNullOrEmpty(AppId) && IsDev != true)
         {
             var envAppId = System.Environment.GetEnvironmentVariable("INNGEST_APP_ID");
             if (string.IsNullOrEmpty(envAppId))
@@ -107,17 +108,32 @@ public class InngestOptions
         ServeOrigin ??= System.Environment.GetEnvironmentVariable("INNGEST_SERVE_ORIGIN");
         ServePath ??= System.Environment.GetEnvironmentVariable("INNGEST_SERVE_PATH");
 
-        // Check for dev mode
-        var devEnv = System.Environment.GetEnvironmentVariable("INNGEST_DEV");
-        if (!string.IsNullOrEmpty(devEnv))
+        // Check for dev mode - only apply env var if IsDev wasn't explicitly set
+        if (!IsDev.HasValue)
         {
-            IsDev = true;
-            // If INNGEST_DEV contains a URL, use it as the dev server URL
-            if (devEnv.StartsWith("http://") || devEnv.StartsWith("https://"))
+            var devEnv = System.Environment.GetEnvironmentVariable("INNGEST_DEV");
+            if (!string.IsNullOrEmpty(devEnv))
             {
-                DevServerUrl = devEnv;
+                // Check for explicit false/0 values
+                if (devEnv.Equals("false", StringComparison.OrdinalIgnoreCase) ||
+                    devEnv.Equals("0", StringComparison.OrdinalIgnoreCase))
+                {
+                    IsDev = false;
+                }
+                else
+                {
+                    IsDev = true;
+                    // If INNGEST_DEV contains a URL, use it as the dev server URL
+                    if (devEnv.StartsWith("http://") || devEnv.StartsWith("https://"))
+                    {
+                        DevServerUrl = devEnv;
+                    }
+                }
             }
         }
+
+        // Default to false (production mode) if not set
+        IsDev ??= false;
 
         DevServerUrl ??= "http://localhost:8288";
     }
