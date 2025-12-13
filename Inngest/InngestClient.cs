@@ -30,7 +30,7 @@ public class InngestClient : IInngestClient
     private readonly string _environment;
     private readonly bool _isDev;
     private readonly bool _disableCronTriggersInDev;
-    private readonly string _sdkVersion = "1.3.0";
+    private readonly string _sdkVersion = "1.3.1";
     private readonly string _appId;
     private readonly ILogger _logger;
     private readonly IInngestFunctionRegistry? _registry;
@@ -228,9 +228,12 @@ public class InngestClient : IInngestClient
         // Ensure required fields
         evt.Id ??= Guid.NewGuid().ToString();
 
+        // In dev mode with no event key, use a dummy key to avoid 303 redirect from /e/
+        var effectiveEventKey = string.IsNullOrEmpty(_eventKey) && _isDev ? "dev" : _eventKey;
+
         var payload = new[] { evt };
         var content = new StringContent(JsonSerializer.Serialize(payload, _jsonOptions), Encoding.UTF8, "application/json");
-        var response = await _httpClient.PostAsync($"{_eventApiOrigin}/e/{_eventKey}", content);
+        var response = await _httpClient.PostAsync($"{_eventApiOrigin}/e/{effectiveEventKey}", content);
 
         return response.IsSuccessStatusCode;
     }
@@ -247,8 +250,11 @@ public class InngestClient : IInngestClient
             return evt;
         }).ToArray();
 
+        // In dev mode with no event key, use a dummy key to avoid 303 redirect from /e/
+        var effectiveEventKey = string.IsNullOrEmpty(_eventKey) && _isDev ? "dev" : _eventKey;
+
         var content = new StringContent(JsonSerializer.Serialize(payload, _jsonOptions), Encoding.UTF8, "application/json");
-        var response = await _httpClient.PostAsync($"{_eventApiOrigin}/e/{_eventKey}", content);
+        var response = await _httpClient.PostAsync($"{_eventApiOrigin}/e/{effectiveEventKey}", content);
 
         return response.IsSuccessStatusCode;
     }
