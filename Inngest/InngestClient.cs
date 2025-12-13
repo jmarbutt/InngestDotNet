@@ -29,7 +29,7 @@ public class InngestClient : IInngestClient
     private readonly Dictionary<string, string> _secrets = new();
     private readonly string _environment;
     private readonly bool _isDev;
-    private readonly string _sdkVersion = "1.2.3";
+    private readonly string _sdkVersion = "1.2.4";
     private readonly string _appId;
     private readonly ILogger _logger;
     private readonly IInngestFunctionRegistry? _registry;
@@ -397,9 +397,25 @@ public class InngestClient : IInngestClient
         // Normalize the key by removing the signkey-{env}- prefix
         var normalizedKey = NormalizeSigningKey(key);
 
-        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(normalizedKey));
+        // The key material is hex-encoded, decode it to bytes
+        // This must match how we sign responses (using Convert.FromHexString)
+        byte[] keyBytes;
+        try
+        {
+            keyBytes = Convert.FromHexString(normalizedKey);
+        }
+        catch (FormatException)
+        {
+            _logger.LogWarning("Signing key is not valid hex, falling back to UTF-8 encoding");
+            keyBytes = Encoding.UTF8.GetBytes(normalizedKey);
+        }
+
+        using var hmac = new HMACSHA256(keyBytes);
         byte[] hashBytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(data));
         string computedSignature = Convert.ToHexString(hashBytes).ToLower();
+
+        _logger.LogDebug("Signature verification: computed={ComputedSig}, expected={ExpectedSig}",
+            computedSignature[..16] + "...", expectedSignature[..Math.Min(16, expectedSignature.Length)] + "...");
 
         // Use constant-time comparison to prevent timing attacks
         return CryptographicOperations.FixedTimeEquals(
@@ -437,27 +453,31 @@ public class InngestClient : IInngestClient
 
             // For in-band sync, read URL from request body if provided
             string? requestBodyUrl = null;
+            string? requestBody = null;
             if (useInBandSync)
             {
                 request.EnableBuffering();
                 using var reader = new StreamReader(request.Body, Encoding.UTF8, leaveOpen: true);
-                var body = await reader.ReadToEndAsync();
+                requestBody = await reader.ReadToEndAsync();
                 request.Body.Position = 0;
 
-                if (!string.IsNullOrEmpty(body))
+                _logger.LogDebug("In-band sync request body: {Body}", requestBody);
+                _logger.LogDebug("In-band sync request headers: X-Inngest-Sync-Kind={SyncKind}", syncKind);
+
+                if (!string.IsNullOrEmpty(requestBody))
                 {
                     try
                     {
-                        var syncRequest = JsonSerializer.Deserialize<SyncRequestPayload>(body, _jsonOptions);
+                        var syncRequest = JsonSerializer.Deserialize<SyncRequestPayload>(requestBody, _jsonOptions);
                         if (syncRequest?.Url != null)
                         {
                             requestBodyUrl = syncRequest.Url;
                             _logger.LogDebug("In-band sync: using URL from request body: {Url}", requestBodyUrl);
                         }
                     }
-                    catch (JsonException)
+                    catch (JsonException ex)
                     {
-                        // Ignore JSON parse errors, fall back to inferring URL
+                        _logger.LogWarning(ex, "Failed to parse in-band sync request body");
                     }
                 }
             }
@@ -780,28 +800,51 @@ public class InngestClient : IInngestClient
 
             // Serialize once to ensure consistency between signing and response
             var responseJson = JsonSerializer.Serialize(inBandResponse, _jsonOptions);
-            _logger.LogDebug("In-band sync response: {ResponseJson}", responseJson);
-
-            // Set response headers
-            response.Headers["X-Inngest-Sync-Kind"] = "in_band";
-            response.Headers["Content-Type"] = "application/json";
+            _logger.LogDebug("In-band sync response JSON: {ResponseJson}", responseJson);
+            _logger.LogDebug("In-band sync response size: {Size} bytes", Encoding.UTF8.GetByteCount(responseJson));
 
             // Sign the response if not in dev mode
+            string? signatureHeader = null;
             if (!_isDev && !string.IsNullOrEmpty(_signingKey))
             {
                 var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds(); // Unix seconds, not milliseconds
                 var dataToSign = $"{responseJson}{timestamp}";
 
                 var normalizedKey = NormalizeSigningKey(_signingKey);
-                var keyBytes = Convert.FromHexString(normalizedKey);
+                _logger.LogDebug("Response signing: key length after normalization = {KeyLen} chars", normalizedKey.Length);
+
+                byte[] keyBytes;
+                try
+                {
+                    keyBytes = Convert.FromHexString(normalizedKey);
+                    _logger.LogDebug("Response signing: using hex-decoded key ({ByteLen} bytes)", keyBytes.Length);
+                }
+                catch (FormatException ex)
+                {
+                    _logger.LogWarning(ex, "Signing key is not valid hex for response signing, falling back to UTF-8");
+                    keyBytes = Encoding.UTF8.GetBytes(normalizedKey);
+                }
+
                 using var hmac = new HMACSHA256(keyBytes);
                 var signatureBytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(dataToSign));
                 var signature = Convert.ToHexString(signatureBytes).ToLower();
 
-                response.Headers["X-Inngest-Signature"] = $"t={timestamp}&s={signature}";
+                signatureHeader = $"t={timestamp}&s={signature}";
+                _logger.LogDebug("Response signature: t={Timestamp}, s={SigPrefix}...", timestamp, signature[..16]);
             }
 
+            // Set status code first, then headers, then body
             response.StatusCode = StatusCodes.Status200OK;
+            response.ContentType = "application/json";
+            response.Headers["X-Inngest-Sync-Kind"] = "in_band";
+            if (signatureHeader != null)
+            {
+                response.Headers["X-Inngest-Signature"] = signatureHeader;
+            }
+
+            _logger.LogInformation("Sending in-band sync response: status=200, functions={FnCount}, url={Url}, signed={IsSigned}",
+                fnArray.Count, url, signatureHeader != null);
+
             // Write the exact JSON we signed (don't re-serialize)
             await response.WriteAsync(responseJson);
             return;
