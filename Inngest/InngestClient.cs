@@ -29,7 +29,7 @@ public class InngestClient : IInngestClient
     private readonly Dictionary<string, string> _secrets = new();
     private readonly string _environment;
     private readonly bool _isDev;
-    private readonly string _sdkVersion = "1.2.1";
+    private readonly string _sdkVersion = "1.2.2";
     private readonly string _appId;
     private readonly ILogger _logger;
     private readonly IInngestFunctionRegistry? _registry;
@@ -424,7 +424,9 @@ public class InngestClient : IInngestClient
             var syncKind = request.Headers.TryGetValue("X-Inngest-Sync-Kind", out var syncKindValues)
                 ? syncKindValues.FirstOrDefault()
                 : null;
-            var useInBandSync = string.Equals(syncKind, "inband", StringComparison.OrdinalIgnoreCase);
+            // Accept both "in_band" (correct) and "inband" (legacy) for compatibility
+            var useInBandSync = string.Equals(syncKind, "in_band", StringComparison.OrdinalIgnoreCase) ||
+                                string.Equals(syncKind, "inband", StringComparison.OrdinalIgnoreCase);
 
             // Check for deployId query parameter
             string? deployId = null;
@@ -433,13 +435,45 @@ public class InngestClient : IInngestClient
                 deployId = deployIdValues.FirstOrDefault();
             }
 
+            // For in-band sync, read URL from request body if provided
+            string? requestBodyUrl = null;
+            if (useInBandSync)
+            {
+                request.EnableBuffering();
+                using var reader = new StreamReader(request.Body, Encoding.UTF8, leaveOpen: true);
+                var body = await reader.ReadToEndAsync();
+                request.Body.Position = 0;
+
+                if (!string.IsNullOrEmpty(body))
+                {
+                    try
+                    {
+                        var syncRequest = JsonSerializer.Deserialize<SyncRequestPayload>(body, _jsonOptions);
+                        if (syncRequest?.Url != null)
+                        {
+                            requestBodyUrl = syncRequest.Url;
+                            _logger.LogDebug("In-band sync: using URL from request body: {Url}", requestBodyUrl);
+                        }
+                    }
+                    catch (JsonException)
+                    {
+                        // Ignore JSON parse errors, fall back to inferring URL
+                    }
+                }
+            }
+
             // Determine URL that Inngest should use to reach this service
             var serveOrigin = Environment.GetEnvironmentVariable("INNGEST_SERVE_ORIGIN");
             var servePath = Environment.GetEnvironmentVariable("INNGEST_SERVE_PATH");
         
         // Try to determine the URL that Inngest can use to reach this service
+        // Priority: 1) Request body URL (for in-band sync), 2) INNGEST_SERVE_ORIGIN, 3) Infer from request
         string url;
-        if (!string.IsNullOrEmpty(serveOrigin))
+        if (!string.IsNullOrEmpty(requestBodyUrl))
+        {
+            url = requestBodyUrl;
+        }
+        else if (!string.IsNullOrEmpty(serveOrigin))
         {
             url = string.IsNullOrEmpty(servePath)
                 ? serveOrigin
@@ -745,14 +779,14 @@ public class InngestClient : IInngestClient
             };
 
             // Set response headers
-            response.Headers["X-Inngest-Sync-Kind"] = "inband";
+            response.Headers["X-Inngest-Sync-Kind"] = "in_band";
             response.Headers["Content-Type"] = "application/json";
 
             // Sign the response if not in dev mode
             if (!_isDev && !string.IsNullOrEmpty(_signingKey))
             {
                 var responseJson = JsonSerializer.Serialize(inBandResponse, _jsonOptions);
-                var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds(); // Unix seconds, not milliseconds
                 var dataToSign = $"{responseJson}{timestamp}";
 
                 var normalizedKey = NormalizeSigningKey(_signingKey);
@@ -876,17 +910,20 @@ public class InngestClient : IInngestClient
 
     private class SyncRequestPayload
     {
+        [JsonPropertyName("url")]
+        public string? Url { get; set; }
+
         [JsonPropertyName("app_id")]
         public string? AppId { get; set; }
-        
+
         [JsonPropertyName("functions")]
         public List<FunctionInfo>? Functions { get; set; }
-        
+
         public class FunctionInfo
         {
             [JsonPropertyName("id")]
             public string? Id { get; set; }
-            
+
             [JsonPropertyName("code")]
             public string? Code { get; set; }
         }
