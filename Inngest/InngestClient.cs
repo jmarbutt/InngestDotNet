@@ -30,7 +30,7 @@ public class InngestClient : IInngestClient
     private readonly string _environment;
     private readonly bool _isDev;
     private readonly bool _disableCronTriggersInDev;
-    private readonly string _sdkVersion = "1.3.6";
+    private readonly string _sdkVersion = "1.3.7";
     private readonly string _appId;
     private readonly ILogger _logger;
     private readonly IInngestFunctionRegistry? _registry;
@@ -499,10 +499,61 @@ public class InngestClient : IInngestClient
 
     /// <summary>
     /// Verifies HMAC-SHA256 signature using raw body bytes.
-    /// This method handles gzip-compressed requests where the signature was computed on raw compressed bytes.
-    /// The data to sign is: raw_body_bytes + timestamp_string_as_bytes
+    /// Per the Inngest SDK spec, the body is JCS (JSON Canonicalization Scheme) canonicalized before signing.
+    /// The data to sign is: jcs_canonicalized_body_bytes + timestamp_string_as_bytes
     /// </summary>
     private bool VerifyHmacSha256WithBytes(byte[] bodyBytes, long timestamp, string key, string expectedSignature)
+    {
+        // Try with JCS canonicalization first (matches Go SDK behavior)
+        if (TryVerifyWithJcs(bodyBytes, timestamp, key, expectedSignature, out bool jcsResult))
+        {
+            if (jcsResult)
+            {
+                _logger.LogDebug("Signature verification succeeded with JCS canonicalization");
+                return true;
+            }
+        }
+
+        // If JCS failed, try without canonicalization (raw bytes)
+        // This handles cases where the body is already canonical or not JSON
+        var rawResult = VerifyHmacSha256Raw(bodyBytes, timestamp, key, expectedSignature, "raw bytes");
+        if (rawResult)
+        {
+            _logger.LogDebug("Signature verification succeeded with raw bytes (no JCS)");
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Attempts to verify signature using JCS canonicalization.
+    /// </summary>
+    private bool TryVerifyWithJcs(byte[] bodyBytes, long timestamp, string key, string expectedSignature, out bool result)
+    {
+        result = false;
+        try
+        {
+            // Apply JCS canonicalization (RFC 8785) - required by Go SDK
+            var canonicalizedBytes = JsonCanonicalizer.Canonicalize(bodyBytes);
+
+            _logger.LogDebug("JCS canonicalization: original={OrigLen} bytes, canonical={CanonLen} bytes",
+                bodyBytes.Length, canonicalizedBytes.Length);
+
+            result = VerifyHmacSha256Raw(canonicalizedBytes, timestamp, key, expectedSignature, "JCS");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "JCS canonicalization failed, will try raw bytes");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Verifies HMAC-SHA256 signature using raw body bytes without any transformation.
+    /// </summary>
+    private bool VerifyHmacSha256Raw(byte[] bodyBytes, long timestamp, string key, string expectedSignature, string mode)
     {
         // Normalize the key by removing the signkey-{env}- prefix
         var normalizedKey = NormalizeSigningKey(key);
@@ -520,8 +571,8 @@ public class InngestClient : IInngestClient
         byte[] hashBytes = hmac.ComputeHash(dataToSign);
         string computedSignature = Convert.ToHexString(hashBytes).ToLower();
 
-        _logger.LogDebug("Signature verification (bytes): computed={ComputedSig}, expected={ExpectedSig}, bodyLen={BodyLen}",
-            computedSignature[..16] + "...", expectedSignature[..Math.Min(16, expectedSignature.Length)] + "...", bodyBytes.Length);
+        _logger.LogDebug("Signature verification ({Mode}): computed={ComputedSig}, expected={ExpectedSig}, bodyLen={BodyLen}",
+            mode, computedSignature[..16] + "...", expectedSignature[..Math.Min(16, expectedSignature.Length)] + "...", bodyBytes.Length);
 
         // Use constant-time comparison to prevent timing attacks
         return CryptographicOperations.FixedTimeEquals(

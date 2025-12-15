@@ -8,6 +8,168 @@ using Microsoft.AspNetCore.Http;
 namespace Inngest.Tests;
 
 /// <summary>
+/// Tests for JSON Canonicalization Scheme (JCS) per RFC 8785.
+/// </summary>
+public class JsonCanonicalizerTests
+{
+    [Fact]
+    public void Canonicalize_SortsObjectKeys()
+    {
+        // Arrange
+        var json = "{\"z\":1,\"a\":2,\"m\":3}";
+
+        // Act
+        var canonical = JsonCanonicalizer.Canonicalize(json);
+
+        // Assert
+        Assert.Equal("{\"a\":2,\"m\":3,\"z\":1}", canonical);
+    }
+
+    [Fact]
+    public void Canonicalize_RemovesWhitespace()
+    {
+        // Arrange
+        var json = @"{
+            ""name"": ""test"",
+            ""value"": 123
+        }";
+
+        // Act
+        var canonical = JsonCanonicalizer.Canonicalize(json);
+
+        // Assert
+        Assert.Equal("{\"name\":\"test\",\"value\":123}", canonical);
+    }
+
+    [Fact]
+    public void Canonicalize_HandlesNestedObjects()
+    {
+        // Arrange
+        var json = "{\"outer\":{\"z\":1,\"a\":2}}";
+
+        // Act
+        var canonical = JsonCanonicalizer.Canonicalize(json);
+
+        // Assert
+        Assert.Equal("{\"outer\":{\"a\":2,\"z\":1}}", canonical);
+    }
+
+    [Fact]
+    public void Canonicalize_HandlesArrays()
+    {
+        // Arrange - arrays should preserve order
+        var json = "[3,1,2]";
+
+        // Act
+        var canonical = JsonCanonicalizer.Canonicalize(json);
+
+        // Assert
+        Assert.Equal("[3,1,2]", canonical);
+    }
+
+    [Fact]
+    public void Canonicalize_HandlesSpecialCharacters()
+    {
+        // Arrange
+        var json = "{\"text\":\"hello\\nworld\\ttab\"}";
+
+        // Act
+        var canonical = JsonCanonicalizer.Canonicalize(json);
+
+        // Assert
+        Assert.Equal("{\"text\":\"hello\\nworld\\ttab\"}", canonical);
+    }
+
+    [Fact]
+    public void Canonicalize_HandlesUnicodeCharacters()
+    {
+        // Arrange
+        var json = "{\"name\":\"Józef O'Brien\"}";
+
+        // Act
+        var canonical = JsonCanonicalizer.Canonicalize(json);
+
+        // Assert
+        Assert.Contains("Józef", canonical);
+        Assert.Contains("O'Brien", canonical);
+    }
+
+    [Fact]
+    public void Canonicalize_HandlesInvalidJson()
+    {
+        // Arrange
+        var invalidJson = "not valid json";
+
+        // Act
+        var result = JsonCanonicalizer.Canonicalize(invalidJson);
+
+        // Assert - should return original on failure
+        Assert.Equal(invalidJson, result);
+    }
+
+    [Fact]
+    public void Canonicalize_ByteOverload_Works()
+    {
+        // Arrange
+        var json = "{\"b\":1,\"a\":2}";
+        var bytes = Encoding.UTF8.GetBytes(json);
+
+        // Act
+        var canonicalBytes = JsonCanonicalizer.Canonicalize(bytes);
+        var canonical = Encoding.UTF8.GetString(canonicalBytes);
+
+        // Assert
+        Assert.Equal("{\"a\":2,\"b\":1}", canonical);
+    }
+
+    [Fact]
+    public void Canonicalize_IsIdempotent()
+    {
+        // Arrange
+        var json = "{\"z\":1,\"a\":2}";
+
+        // Act
+        var once = JsonCanonicalizer.Canonicalize(json);
+        var twice = JsonCanonicalizer.Canonicalize(once);
+
+        // Assert
+        Assert.Equal(once, twice);
+    }
+
+    [Fact]
+    public void Canonicalize_HandlesInngestPayload()
+    {
+        // Arrange - typical Inngest event payload
+        var json = @"{
+            ""event"": {
+                ""name"": ""resend/email.delivered"",
+                ""data"": {
+                    ""email_id"": ""abc123"",
+                    ""from"": ""test@example.com"",
+                    ""to"": [""user@example.com""]
+                },
+                ""ts"": 1705586504000
+            },
+            ""steps"": {},
+            ""ctx"": {
+                ""run_id"": ""run123"",
+                ""attempt"": 0
+            }
+        }";
+
+        // Act
+        var canonical = JsonCanonicalizer.Canonicalize(json);
+
+        // Assert
+        Assert.DoesNotContain("\n", canonical);
+        Assert.DoesNotContain("  ", canonical);
+        // Keys should be sorted
+        Assert.True(canonical.IndexOf("\"attempt\"") < canonical.IndexOf("\"run_id\""));
+    }
+}
+
+
+/// <summary>
 /// Tests for signature verification with gzip-compressed request bodies.
 /// This tests the fix for: Inngest computes signatures on raw wire bytes (gzip compressed),
 /// but ASP.NET Core may decompress before we can verify.
