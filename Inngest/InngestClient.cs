@@ -30,7 +30,7 @@ public class InngestClient : IInngestClient
     private readonly string _environment;
     private readonly bool _isDev;
     private readonly bool _disableCronTriggersInDev;
-    private readonly string _sdkVersion = "1.3.4";
+    private readonly string _sdkVersion = "1.3.6";
     private readonly string _appId;
     private readonly ILogger _logger;
     private readonly IInngestFunctionRegistry? _registry;
@@ -388,7 +388,30 @@ public class InngestClient : IInngestClient
             return false;
         }
 
-        // Read the request body
+        // Check if we have raw body bytes captured by the middleware
+        // This is critical for gzip-compressed requests where the signature is computed on raw compressed bytes
+        byte[]? rawBodyBytes = null;
+        string? originalContentEncoding = null;
+
+        if (context.Items.TryGetValue(Internal.RawBodyMiddleware.RawBodyKey, out var rawBodyObj) && rawBodyObj is byte[] bytes)
+        {
+            rawBodyBytes = bytes;
+        }
+
+        if (context.Items.TryGetValue(Internal.RawBodyMiddleware.RawBodyEncodingKey, out var encodingObj) && encodingObj is string encoding)
+        {
+            originalContentEncoding = encoding;
+        }
+
+        _logger.LogDebug(
+            "Signature verification: Method={Method}, HasRawBytes={HasRawBytes}, RawBytesLength={RawBytesLength}, OriginalEncoding={Encoding}, CurrentEncoding={CurrentEncoding}",
+            request.Method,
+            rawBodyBytes != null,
+            rawBodyBytes?.Length ?? 0,
+            originalContentEncoding ?? "(none)",
+            request.Headers.ContentEncoding.ToString());
+
+        // Read the request body (for fallback and for logging)
         request.EnableBuffering();
 
         string requestBody;
@@ -401,7 +424,7 @@ public class InngestClient : IInngestClient
         request.Body.Position = 0;
 
         // Check if body is empty (might indicate buffering issue)
-        if (string.IsNullOrEmpty(requestBody))
+        if (string.IsNullOrEmpty(requestBody) && (rawBodyBytes == null || rawBodyBytes.Length == 0))
         {
             _logger.LogWarning("Signature verification failed: Request body is empty. ContentLength={ContentLength}, CanSeek={CanSeek}",
                 request.ContentLength,
@@ -409,16 +432,46 @@ public class InngestClient : IInngestClient
             return false;
         }
 
-        // Try to verify with primary signing key
-        // The data to sign is: body + timestamp (as string)
-        var dataToSign = requestBody + timestamp;
-        bool verified = VerifyHmacSha256(dataToSign, _signingKey, signatureValue);
+        // Try to verify signature
+        // Priority: Use raw bytes if available (handles gzip case), otherwise use string body
+        bool verified = false;
 
-        // If primary fails and we have a fallback, try that
-        if (!verified && !string.IsNullOrEmpty(_signingKeyFallback))
+        if (rawBodyBytes != null && rawBodyBytes.Length > 0)
         {
-            _logger.LogDebug("Primary signing key verification failed, trying fallback key");
-            verified = VerifyHmacSha256(dataToSign, _signingKeyFallback, signatureValue);
+            // Verify using raw bytes (handles gzip-compressed requests correctly)
+            verified = VerifyHmacSha256WithBytes(rawBodyBytes, timestamp, _signingKey, signatureValue);
+
+            if (!verified && !string.IsNullOrEmpty(_signingKeyFallback))
+            {
+                _logger.LogDebug("Primary signing key verification with raw bytes failed, trying fallback key");
+                verified = VerifyHmacSha256WithBytes(rawBodyBytes, timestamp, _signingKeyFallback, signatureValue);
+            }
+
+            // If raw bytes verification failed but we have a string body, try string-based verification
+            // This handles the case where content wasn't actually compressed
+            if (!verified && !string.IsNullOrEmpty(requestBody))
+            {
+                _logger.LogDebug("Raw bytes verification failed, trying string-based verification");
+                var dataToSign = requestBody + timestamp;
+                verified = VerifyHmacSha256(dataToSign, _signingKey, signatureValue);
+
+                if (!verified && !string.IsNullOrEmpty(_signingKeyFallback))
+                {
+                    verified = VerifyHmacSha256(dataToSign, _signingKeyFallback, signatureValue);
+                }
+            }
+        }
+        else
+        {
+            // Fallback: verify using string body (original behavior)
+            var dataToSign = requestBody + timestamp;
+            verified = VerifyHmacSha256(dataToSign, _signingKey, signatureValue);
+
+            if (!verified && !string.IsNullOrEmpty(_signingKeyFallback))
+            {
+                _logger.LogDebug("Primary signing key verification failed, trying fallback key");
+                verified = VerifyHmacSha256(dataToSign, _signingKeyFallback, signatureValue);
+            }
         }
 
         if (!verified)
@@ -427,9 +480,10 @@ public class InngestClient : IInngestClient
             var bodyStart = requestBody.Length > 50 ? requestBody[..50] : requestBody;
             var bodyEnd = requestBody.Length > 50 ? requestBody[^50..] : "";
             _logger.LogWarning(
-                "Signature verification failed: HMAC mismatch. KeyPrefix={KeyPrefix}, BodyLength={BodyLength}, Timestamp={Timestamp}, BodyHash={BodyHash}, BodyStart={BodyStart}, BodyEnd={BodyEnd}",
+                "Signature verification failed: HMAC mismatch. KeyPrefix={KeyPrefix}, BodyLength={BodyLength}, RawBytesLength={RawBytesLength}, Timestamp={Timestamp}, BodyHash={BodyHash}, BodyStart={BodyStart}, BodyEnd={BodyEnd}",
                 SigningKeyPrefixRegex.Match(_signingKey).Value,
                 requestBody.Length,
+                rawBodyBytes?.Length ?? 0,
                 timestamp,
                 Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(requestBody)))[..16],
                 bodyStart.Replace("\n", "\\n").Replace("\r", "\\r"),
@@ -441,6 +495,38 @@ public class InngestClient : IInngestClient
         }
 
         return verified;
+    }
+
+    /// <summary>
+    /// Verifies HMAC-SHA256 signature using raw body bytes.
+    /// This method handles gzip-compressed requests where the signature was computed on raw compressed bytes.
+    /// The data to sign is: raw_body_bytes + timestamp_string_as_bytes
+    /// </summary>
+    private bool VerifyHmacSha256WithBytes(byte[] bodyBytes, long timestamp, string key, string expectedSignature)
+    {
+        // Normalize the key by removing the signkey-{env}- prefix
+        var normalizedKey = NormalizeSigningKey(key);
+
+        // Use the key as UTF-8 string bytes (this matches how other Inngest SDKs work)
+        var keyBytes = Encoding.UTF8.GetBytes(normalizedKey);
+
+        // The data to sign is body bytes concatenated with timestamp string bytes
+        var timestampBytes = Encoding.UTF8.GetBytes(timestamp.ToString());
+        var dataToSign = new byte[bodyBytes.Length + timestampBytes.Length];
+        Buffer.BlockCopy(bodyBytes, 0, dataToSign, 0, bodyBytes.Length);
+        Buffer.BlockCopy(timestampBytes, 0, dataToSign, bodyBytes.Length, timestampBytes.Length);
+
+        using var hmac = new HMACSHA256(keyBytes);
+        byte[] hashBytes = hmac.ComputeHash(dataToSign);
+        string computedSignature = Convert.ToHexString(hashBytes).ToLower();
+
+        _logger.LogDebug("Signature verification (bytes): computed={ComputedSig}, expected={ExpectedSig}, bodyLen={BodyLen}",
+            computedSignature[..16] + "...", expectedSignature[..Math.Min(16, expectedSignature.Length)] + "...", bodyBytes.Length);
+
+        // Use constant-time comparison to prevent timing attacks
+        return CryptographicOperations.FixedTimeEquals(
+            Encoding.UTF8.GetBytes(computedSignature),
+            Encoding.UTF8.GetBytes(expectedSignature.ToLower()));
     }
     
     /// <summary>

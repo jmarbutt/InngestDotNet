@@ -14,7 +14,9 @@ namespace Inngest;
 public static class InngestMiddlewareExtensions
 {
     /// <summary>
-    /// Adds Inngest middleware to the application pipeline
+    /// Adds Inngest middleware to the application pipeline.
+    /// This includes raw body capture middleware for proper signature verification
+    /// of gzip-compressed requests.
     /// </summary>
     /// <param name="app">The application builder</param>
     /// <param name="path">The path where Inngest functions will be registered (default: /api/inngest)</param>
@@ -23,6 +25,10 @@ public static class InngestMiddlewareExtensions
     {
         return app.Map(path, builder =>
         {
+            // Add raw body capture middleware first to capture bytes before any decompression
+            // This is critical for signature verification with gzip-compressed POST requests
+            builder.UseMiddleware<RawBodyMiddleware>();
+
             builder.Run(async context =>
             {
                 var inngestClient = context.RequestServices.GetRequiredService<IInngestClient>();
