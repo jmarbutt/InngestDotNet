@@ -400,6 +400,15 @@ public class InngestClient : IInngestClient
         // Reset the position so it can be read again in the handler
         request.Body.Position = 0;
 
+        // Check if body is empty (might indicate buffering issue)
+        if (string.IsNullOrEmpty(requestBody))
+        {
+            _logger.LogWarning("Signature verification failed: Request body is empty. ContentLength={ContentLength}, CanSeek={CanSeek}",
+                request.ContentLength,
+                request.Body.CanSeek);
+            return false;
+        }
+
         // Try to verify with primary signing key
         // The data to sign is: body + timestamp (as string)
         var dataToSign = requestBody + timestamp;
@@ -414,8 +423,17 @@ public class InngestClient : IInngestClient
 
         if (!verified)
         {
-            _logger.LogWarning("Signature verification failed: HMAC mismatch (key prefix: {KeyPrefix})",
-                SigningKeyPrefixRegex.Match(_signingKey).Value);
+            // Log detailed info to help diagnose webhook signature issues
+            var bodyStart = requestBody.Length > 50 ? requestBody[..50] : requestBody;
+            var bodyEnd = requestBody.Length > 50 ? requestBody[^50..] : "";
+            _logger.LogWarning(
+                "Signature verification failed: HMAC mismatch. KeyPrefix={KeyPrefix}, BodyLength={BodyLength}, Timestamp={Timestamp}, BodyHash={BodyHash}, BodyStart={BodyStart}, BodyEnd={BodyEnd}",
+                SigningKeyPrefixRegex.Match(_signingKey).Value,
+                requestBody.Length,
+                timestamp,
+                Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(requestBody)))[..16],
+                bodyStart.Replace("\n", "\\n").Replace("\r", "\\r"),
+                bodyEnd.Replace("\n", "\\n").Replace("\r", "\\r"));
         }
         else
         {
