@@ -19,7 +19,7 @@
         <PackageReleaseNotes>https://github.com/jmarbutt/InngestDotNet/releases</PackageReleaseNotes>
 
         <!-- Version is set by CI, default for local builds -->
-        <Version>1.3.4</Version>
+        <Version>1.3.5</Version>
 
         <!-- Build settings -->
         <GenerateDocumentationFile>true</GenerateDocumentationFile>
