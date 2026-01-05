@@ -30,7 +30,7 @@ public class InngestClient : IInngestClient
     private readonly string _environment;
     private readonly bool _isDev;
     private readonly bool _disableCronTriggersInDev;
-    private readonly string _sdkVersion = "1.3.7";
+    private readonly string _sdkVersion = "1.4.0";
     private readonly string _appId;
     private readonly ILogger _logger;
     private readonly IInngestFunctionRegistry? _registry;
@@ -946,6 +946,18 @@ public class InngestClient : IInngestClient
                 if (fn.Options.Retry != null && fn.Options.Retry.Attempts.HasValue)
                 {
                     functionObj["retries"] = fn.Options.Retry.Attempts.Value;
+                }
+
+                // Timeouts
+                if (fn.Options.Timeouts != null)
+                {
+                    var timeouts = new Dictionary<string, object>();
+                    if (fn.Options.Timeouts.Start != null)
+                        timeouts["start"] = fn.Options.Timeouts.Start;
+                    if (fn.Options.Timeouts.Finish != null)
+                        timeouts["finish"] = fn.Options.Timeouts.Finish;
+                    if (timeouts.Count > 0)
+                        functionObj["timeouts"] = timeouts;
                 }
             }
 

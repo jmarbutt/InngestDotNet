@@ -228,6 +228,40 @@ internal sealed class InngestFunctionRegistry : IInngestFunctionRegistry
             hasOptions = true;
         }
 
+        // Throttle
+        var throttleAttr = functionType.GetCustomAttribute<ThrottleAttribute>();
+        if (throttleAttr != null)
+        {
+            options.Throttle = new ThrottleOptions
+            {
+                Limit = throttleAttr.Limit,
+                Period = throttleAttr.Period,
+                Key = throttleAttr.Key,
+                Burst = throttleAttr.Burst
+            };
+            hasOptions = true;
+        }
+
+        // Idempotency
+        var idempotencyAttr = functionType.GetCustomAttribute<IdempotencyAttribute>();
+        if (idempotencyAttr != null)
+        {
+            options.IdempotencyKey = idempotencyAttr.Key;
+            hasOptions = true;
+        }
+
+        // Timeout
+        var timeoutAttr = functionType.GetCustomAttribute<TimeoutAttribute>();
+        if (timeoutAttr != null && (timeoutAttr.Start != null || timeoutAttr.Finish != null))
+        {
+            options.Timeouts = new TimeoutOptions
+            {
+                Start = timeoutAttr.Start,
+                Finish = timeoutAttr.Finish
+            };
+            hasOptions = true;
+        }
+
         return hasOptions ? options : null;
     }
 }

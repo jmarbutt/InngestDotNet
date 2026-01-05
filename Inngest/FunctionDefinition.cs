@@ -153,6 +153,11 @@ public class FunctionOptions
     /// Idempotency key expression (CEL) to prevent duplicate executions
     /// </summary>
     public string? IdempotencyKey { get; set; }
+
+    /// <summary>
+    /// Timeout configuration to automatically cancel runs that take too long
+    /// </summary>
+    public TimeoutOptions? Timeouts { get; set; }
 }
 
 /// <summary>
@@ -290,6 +295,26 @@ public class CancellationOptions
     /// Timeout after which to cancel (e.g., "1h")
     /// </summary>
     public string? Timeout { get; set; }
+}
+
+/// <summary>
+/// Timeout configuration to automatically cancel runs that take too long
+/// </summary>
+public class TimeoutOptions
+{
+    /// <summary>
+    /// Maximum time a run can wait in the queue before starting.
+    /// Uses Inngest time string format (e.g., "10s", "1m", "1h").
+    /// If exceeded, the run is cancelled before it starts.
+    /// </summary>
+    public string? Start { get; set; }
+
+    /// <summary>
+    /// Maximum time a run can execute after starting.
+    /// Uses Inngest time string format (e.g., "30s", "5m", "1h").
+    /// If exceeded, the run is cancelled during execution.
+    /// </summary>
+    public string? Finish { get; set; }
 }
 
 /// <summary>
