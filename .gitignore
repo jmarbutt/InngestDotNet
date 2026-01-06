@@ -2,6 +2,9 @@ bin/
 obj/
 /packages/
 riderModule.iml
+*.DotSettings.user
+*.DotSettings
+/.idea/
 /_ReSharper.Caches/.env.test
 .env.test
 .inngest/

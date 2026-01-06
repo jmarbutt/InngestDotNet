@@ -28,7 +28,7 @@ public class InngestEvent : IInngestEvent
     /// Must be an object, in order to encourage evolving data.
     /// </summary>
     [JsonPropertyName("data")]
-    public object Data { get; set; } = new();
+    public object? Data { get; set; }
 
     /// <summary>
     /// Timestamp in Unix milliseconds when the event occurred
@@ -61,7 +61,7 @@ public class InngestEvent : IInngestEvent
     public InngestEvent(string name, object data)
     {
         Name = name;
-        Data = data;
+        Data = data ?? throw new ArgumentNullException(nameof(data));
         Id = Guid.NewGuid().ToString();
     }
 

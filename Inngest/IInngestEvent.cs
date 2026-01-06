@@ -18,7 +18,7 @@ public interface IInngestEvent
     /// <summary>
     /// Custom data payload for the event
     /// </summary>
-    public object Data { get; set; }
+    public object? Data { get; set; }
     
     /// <summary>
     /// Timestamp in Unix milliseconds when the event occurred

@@ -60,7 +60,10 @@ public class InngestClient : IInngestClient
         _signingKey = signingKey ?? Environment.GetEnvironmentVariable("INNGEST_SIGNING_KEY") ?? "";
         _signingKeyFallback = Environment.GetEnvironmentVariable("INNGEST_SIGNING_KEY_FALLBACK");
         _environment = Environment.GetEnvironmentVariable("INNGEST_ENV") ?? "dev";
-        _isDev = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("INNGEST_DEV"));
+        var devEnv = Environment.GetEnvironmentVariable("INNGEST_DEV");
+        _isDev = !string.IsNullOrEmpty(devEnv) &&
+                 !devEnv.Equals("false", StringComparison.OrdinalIgnoreCase) &&
+                 !devEnv.Equals("0", StringComparison.OrdinalIgnoreCase);
         _appId = appId ?? Environment.GetEnvironmentVariable("INNGEST_APP_ID") ?? "inngest-dotnet";
 
         // Check for disable cron in dev from environment variable
@@ -71,7 +74,7 @@ public class InngestClient : IInngestClient
         _logger = logger ?? NullLogger.Instance;
 
         // Set API endpoints based on dev mode and environment variables
-        string devServerUrl = Environment.GetEnvironmentVariable("INNGEST_DEV") ?? "http://localhost:8288";
+        string devServerUrl = devEnv ?? "http://localhost:8288";
         if (!Uri.TryCreate(devServerUrl, UriKind.Absolute, out _))
         {
             devServerUrl = "http://localhost:8288";
@@ -310,10 +313,10 @@ public class InngestClient : IInngestClient
         response.Headers["X-Inngest-Sdk"] = $"inngest-dotnet:v{_sdkVersion}";
         response.Headers["X-Inngest-Req-Version"] = "1";
 
-        // Verify the request if signatures are required
-        if (!_isDev && !await VerifySignature(context))
+        // Verify signature only on requests that carry a body (PUT/POST). GET introspection is allowed to be unauthenticated.
+        if (!_isDev && (request.Method == "PUT" || request.Method == "POST") && !await VerifySignature(context))
         {
-            response.StatusCode = StatusCodes.Status500InternalServerError;
+            response.StatusCode = StatusCodes.Status401Unauthorized;
             await response.WriteAsJsonAsync(new { error = "Invalid signature" });
             return;
         }
@@ -379,12 +382,12 @@ public class InngestClient : IInngestClient
             return false;
         }
 
-        // Verify timestamp is not too old (within last 5 minutes)
+        // Verify timestamp is not too old/new (within last 5 minutes)
         var timestampDateTime = DateTimeOffset.FromUnixTimeSeconds(timestamp);
         var timeDelta = DateTimeOffset.UtcNow.Subtract(timestampDateTime);
-        if (timeDelta.TotalMinutes > 5)
+        if (Math.Abs(timeDelta.TotalMinutes) > 5)
         {
-            _logger.LogWarning("Signature verification failed: Timestamp too old ({TimeDelta:F1} minutes)", timeDelta.TotalMinutes);
+            _logger.LogWarning("Signature verification failed: Timestamp outside allowed window ({TimeDelta:F1} minutes)", timeDelta.TotalMinutes);
             return false;
         }
 
@@ -1467,7 +1470,7 @@ public class InngestClient : IInngestClient
         }
         
         // Always include the unauthenticated response fields
-        var responseObj = new Dictionary<string, object>
+        var responseObj = new Dictionary<string, object?>
         {
             ["function_count"] = _functions.Count,
             ["has_event_key"] = !string.IsNullOrEmpty(_eventKey),

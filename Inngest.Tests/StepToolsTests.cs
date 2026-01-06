@@ -112,8 +112,9 @@ public class StepToolsTests
         Assert.Equal("error-step", exception.Operations[0].Id);
         Assert.Equal(StepOpCode.StepError, exception.Operations[0].Op);
         Assert.NotNull(exception.Operations[0].Error);
-        Assert.Equal("InvalidOperationException", exception.Operations[0].Error.Name);
-        Assert.Equal("Test error message", exception.Operations[0].Error.Message);
+        var error = exception.Operations[0].Error!;
+        Assert.Equal("InvalidOperationException", error.Name);
+        Assert.Equal("Test error message", error.Message);
     }
 
     [Fact]
