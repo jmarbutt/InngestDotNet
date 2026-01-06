@@ -28,7 +28,7 @@ namespace Inngest
         /// </summary>
         /// <param name="function">The function definition</param>
         /// <param name="stepId">The ID of the step</param>
-        /// <param name="duration">Duration of the sleep in seconds (informational only)</param>
+        /// <param name="durationSeconds">Duration of the sleep in seconds (informational only)</param>
         /// <returns>The updated function definition</returns>
         public static FunctionDefinition WithSleep(this FunctionDefinition function, string stepId, int durationSeconds)
         {

@@ -8,6 +8,9 @@ namespace Inngest.JsonConverters;
 /// </summary>
 public class StringToDictionaryConverter : JsonConverter<Dictionary<string, string>?>
 {
+    /// <summary>
+    /// Reads JSON that may be an object, string, or null into a string dictionary.
+    /// </summary>
     public override Dictionary<string, string>? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
     {
         if (reader.TokenType == JsonTokenType.String)
@@ -54,6 +57,9 @@ public class StringToDictionaryConverter : JsonConverter<Dictionary<string, stri
         throw new JsonException($"Cannot convert {reader.TokenType} to Dictionary<string, string>");
     }
 
+    /// <summary>
+    /// Writes the dictionary as a JSON object, or null when the value is null.
+    /// </summary>
     public override void Write(Utf8JsonWriter writer, Dictionary<string, string>? value, JsonSerializerOptions options)
     {
         if (value == null)

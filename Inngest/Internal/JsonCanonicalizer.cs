@@ -44,7 +44,7 @@ public static class JsonCanonicalizer
     /// <returns>Canonicalized JSON as UTF-8 bytes</returns>
     public static byte[] Canonicalize(byte[] jsonBytes)
     {
-        if (jsonBytes == null || jsonBytes.Length == 0)
+        if (jsonBytes.Length == 0)
             return jsonBytes;
 
         try
