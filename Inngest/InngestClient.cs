@@ -162,10 +162,40 @@ public class InngestClient : IInngestClient
                 registration.Triggers,
                 handler,
                 registration.Options
-            );
+            )
+            {
+                FailureHandlerType = registration.FailureHandlerType
+            };
 
-            var fullId = $"{_appId}-{registration.Id}";
             _functions[registration.Id] = functionDefinition;
+
+            // If the function has an onFailure handler, register a companion function
+            if (registration.FailureHandlerType != null)
+            {
+                var parentFunctionId = $"{_appId}-{registration.Id}";
+                var failureHandler = FunctionAdapter.CreateFailureHandler(
+                    registration.FailureHandlerType,
+                    parentFunctionId,
+                    _serviceProvider);
+
+                var failureFunctionId = $"{registration.Id}:on-failure";
+                var failureTrigger = FunctionTrigger.CreateEventTrigger("inngest/function.failed");
+                // Add filter expression to only trigger for this parent function
+                failureTrigger.Constraint = new EventConstraint
+                {
+                    Expression = $"event.data.function_id == \"{parentFunctionId}\""
+                };
+
+                var failureFunctionDefinition = new FunctionDefinition(
+                    failureFunctionId,
+                    $"{registration.Name} (On Failure)",
+                    new[] { failureTrigger },
+                    failureHandler,
+                    null // No special options for failure handlers
+                );
+
+                _functions[failureFunctionId] = failureFunctionDefinition;
+            }
         }
     }
 
@@ -843,9 +873,25 @@ public class InngestClient : IInngestClient
             // Add optional configuration
             if (fn.Options != null)
             {
-                // Concurrency
-                if (fn.Options.ConcurrencyOptions != null)
+                // Concurrency - supports multiple constraints
+                if (fn.Options.ConcurrencyConstraints != null && fn.Options.ConcurrencyConstraints.Count > 0)
                 {
+                    var concurrencyArray = fn.Options.ConcurrencyConstraints
+                        .Select(c =>
+                        {
+                            var constraint = new Dictionary<string, object> { ["limit"] = c.Limit };
+                            if (c.Key != null)
+                                constraint["key"] = c.Key;
+                            if (c.Scope != null)
+                                constraint["scope"] = c.Scope;
+                            return constraint;
+                        })
+                        .ToArray();
+                    functionObj["concurrency"] = concurrencyArray;
+                }
+                else if (fn.Options.ConcurrencyOptions != null)
+                {
+                    // Legacy single constraint support
                     var concurrency = new Dictionary<string, object>
                     {
                         ["limit"] = fn.Options.ConcurrencyOptions.Limit
@@ -939,9 +985,26 @@ public class InngestClient : IInngestClient
                     functionObj["cancel"] = new[] { cancel };
                 }
 
-                // Idempotency
-                if (fn.Options.IdempotencyKey != null)
+                // Idempotency - supports optional TTL period
+                if (fn.Options.Idempotency != null)
                 {
+                    // When period is specified, use object format; otherwise just the key string
+                    if (fn.Options.Idempotency.Period != null)
+                    {
+                        functionObj["idempotency"] = new Dictionary<string, object>
+                        {
+                            ["key"] = fn.Options.Idempotency.Key,
+                            ["ttl"] = fn.Options.Idempotency.Period
+                        };
+                    }
+                    else
+                    {
+                        functionObj["idempotency"] = fn.Options.Idempotency.Key;
+                    }
+                }
+                else if (fn.Options.IdempotencyKey != null)
+                {
+                    // Legacy string-only support
                     functionObj["idempotency"] = fn.Options.IdempotencyKey;
                 }
 
@@ -1349,6 +1412,9 @@ public class InngestClient : IInngestClient
             string runId = payload.Ctx?.RunId ?? firstEvent.Id ?? Guid.NewGuid().ToString();
             int attempt = payload.Ctx?.Attempt ?? 0;
 
+            // Get max attempts from function config (default: 4, which is Inngest's default)
+            int maxAttempts = function.Options?.Retry?.Attempts ?? 4;
+
             // Create step tools with memoized state from Inngest
             // Pass the event sender delegate so step.sendEvent can actually send events
             var stepTools = new StepTools(
@@ -1366,12 +1432,23 @@ public class InngestClient : IInngestClient
                     RunId = runId,
                     FunctionId = actualFunctionId,
                     Attempt = attempt,
+                    MaxAttempts = maxAttempts,
                     IsReplay = payload.Steps.Count > 0
                 },
                 _logger);
 
-            _logger.LogDebug("Executing function {FunctionId} (run: {RunId}, attempt: {Attempt}, memoized steps: {StepCount})",
-                actualFunctionId, runId, attempt, payload.Steps.Count);
+            // Create structured logging scope for observability
+            // All logs within this scope will include these properties
+            using var loggingScope = _logger.BeginScope(new Dictionary<string, object>
+            {
+                ["inngest.function_id"] = actualFunctionId,
+                ["inngest.run_id"] = runId,
+                ["inngest.event_name"] = firstEvent.Name ?? "",
+                ["inngest.event_id"] = firstEvent.Id ?? "",
+                ["inngest.attempt"] = attempt
+            });
+
+            _logger.LogDebug("Executing function (memoized steps: {StepCount})", payload.Steps.Count);
 
             try
             {
@@ -1379,7 +1456,7 @@ public class InngestClient : IInngestClient
                 var result = await function.Handler(inngestContext);
 
                 // Function completed successfully - return 200 with result
-                _logger.LogDebug("Function {FunctionId} completed successfully", actualFunctionId);
+                _logger.LogDebug("Function completed successfully");
                 response.StatusCode = StatusCodes.Status200OK;
                 await response.WriteAsJsonAsync(result, _jsonOptions);
             }
@@ -1403,8 +1480,7 @@ public class InngestClient : IInngestClient
                 }
 
                 // Steps need to be scheduled - return 206 with operations
-                _logger.LogDebug("Function {FunctionId} requires step scheduling: {StepCount} operation(s)",
-                    actualFunctionId, stepEx.Operations.Count);
+                _logger.LogDebug("Function requires step scheduling: {StepCount} operation(s)", stepEx.Operations.Count);
 
                 response.StatusCode = 206; // Partial Content
                 await response.WriteAsJsonAsync(stepEx.Operations, _jsonOptions);
@@ -1412,7 +1488,7 @@ public class InngestClient : IInngestClient
             catch (NonRetriableException ex)
             {
                 // Non-retriable error - return 400 with no-retry header
-                _logger.LogWarning(ex, "Function {FunctionId} failed with non-retriable error", actualFunctionId);
+                _logger.LogWarning(ex, "Function failed with non-retriable error");
 
                 response.StatusCode = StatusCodes.Status400BadRequest;
                 response.Headers["X-Inngest-No-Retry"] = "true";
@@ -1421,7 +1497,7 @@ public class InngestClient : IInngestClient
             catch (RetryAfterException ex)
             {
                 // Retriable error with specific delay
-                _logger.LogWarning(ex, "Function {FunctionId} failed, retry after {RetryAfter}", actualFunctionId, ex.RetryAfter);
+                _logger.LogWarning(ex, "Function failed, retry after {RetryAfter}", ex.RetryAfter);
 
                 response.StatusCode = StatusCodes.Status500InternalServerError;
                 response.Headers["X-Inngest-No-Retry"] = "false";
@@ -1431,7 +1507,7 @@ public class InngestClient : IInngestClient
             catch (Exception ex)
             {
                 // Retriable error
-                _logger.LogError(ex, "Function {FunctionId} failed with retriable error", actualFunctionId);
+                _logger.LogError(ex, "Function failed with retriable error");
 
                 response.StatusCode = StatusCodes.Status500InternalServerError;
                 response.Headers["X-Inngest-No-Retry"] = "false";

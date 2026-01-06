@@ -14,6 +14,11 @@ internal sealed class FunctionRegistration
     public required FunctionTrigger[] Triggers { get; init; }
     public FunctionOptions? Options { get; init; }
     public Type? EventDataType { get; init; }
+
+    /// <summary>
+    /// The type of the onFailure handler, if configured
+    /// </summary>
+    public Type? FailureHandlerType { get; init; }
 }
 
 /// <summary>
@@ -113,6 +118,10 @@ internal sealed class InngestFunctionRegistry : IInngestFunctionRegistry
         // Get options from attributes
         var options = GetFunctionOptions(functionType);
 
+        // Get onFailure handler if configured
+        var onFailureAttr = functionType.GetCustomAttribute<OnFailureAttribute>();
+        Type? failureHandlerType = onFailureAttr?.HandlerType;
+
         return new FunctionRegistration
         {
             Id = functionAttr.Id,
@@ -120,7 +129,8 @@ internal sealed class InngestFunctionRegistry : IInngestFunctionRegistry
             FunctionType = functionType,
             Triggers = triggers,
             Options = options,
-            EventDataType = eventDataType
+            EventDataType = eventDataType,
+            FailureHandlerType = failureHandlerType
         };
     }
 
@@ -202,16 +212,67 @@ internal sealed class InngestFunctionRegistry : IInngestFunctionRegistry
             hasOptions = true;
         }
 
-        // Concurrency
-        var concurrencyAttr = functionType.GetCustomAttribute<ConcurrencyAttribute>();
-        if (concurrencyAttr != null)
+        // Concurrency - supports multiple attributes
+        var concurrencyAttrs = functionType.GetCustomAttributes<ConcurrencyAttribute>().ToList();
+        if (concurrencyAttrs.Count > 0)
         {
-            options.ConcurrencyOptions = new ConcurrencyOptions
+            var constraints = new List<ConcurrencyOptions>();
+            var globalConstraints = new List<ConcurrencyOptions>();
+
+            foreach (var attr in concurrencyAttrs)
             {
-                Limit = concurrencyAttr.Limit,
-                Key = concurrencyAttr.Key,
-                Scope = concurrencyAttr.Scope
-            };
+                var constraint = new ConcurrencyOptions
+                {
+                    Limit = attr.Limit,
+                    Key = attr.Key,
+                    Scope = attr.Scope
+                };
+
+                if (attr.Key == null)
+                {
+                    globalConstraints.Add(constraint);
+                }
+                else
+                {
+                    constraints.Add(constraint);
+                }
+            }
+
+            // Validate: at most one global constraint
+            if (globalConstraints.Count > 1)
+            {
+                throw new InvalidOperationException(
+                    $"Function {functionType.Name} has {globalConstraints.Count} global concurrency constraints. " +
+                    "Only one global constraint (without Key) is allowed.");
+            }
+
+            // Validate: no duplicate keyed constraints with different limits
+            var keyedGroups = constraints.GroupBy(c => c.Key).ToList();
+            foreach (var group in keyedGroups)
+            {
+                var distinctLimits = group.Select(c => c.Limit).Distinct().ToList();
+                if (distinctLimits.Count > 1)
+                {
+                    throw new InvalidOperationException(
+                        $"Function {functionType.Name} has conflicting concurrency limits " +
+                        $"for key '{group.Key}': {string.Join(", ", distinctLimits)}. " +
+                        "Each key must have a consistent limit.");
+                }
+            }
+
+            // Dedupe exact duplicates (same Key + Limit)
+            var deduped = constraints
+                .GroupBy(c => new { c.Key, c.Limit })
+                .Select(g => g.First())
+                .ToList();
+
+            // Deterministic ordering: keyed constraints sorted by Key, then global last
+            var sortedConstraints = deduped
+                .OrderBy(c => c.Key, StringComparer.Ordinal)
+                .Concat(globalConstraints)
+                .ToList();
+
+            options.ConcurrencyConstraints = sortedConstraints;
             hasOptions = true;
         }
 
@@ -242,11 +303,15 @@ internal sealed class InngestFunctionRegistry : IInngestFunctionRegistry
             hasOptions = true;
         }
 
-        // Idempotency
+        // Idempotency - with optional TTL period
         var idempotencyAttr = functionType.GetCustomAttribute<IdempotencyAttribute>();
         if (idempotencyAttr != null)
         {
-            options.IdempotencyKey = idempotencyAttr.Key;
+            options.Idempotency = new IdempotencyOptions
+            {
+                Key = idempotencyAttr.Key,
+                Period = idempotencyAttr.Period
+            };
             hasOptions = true;
         }
 

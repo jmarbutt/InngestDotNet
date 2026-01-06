@@ -2,6 +2,8 @@ namespace Inngest.Attributes;
 
 /// <summary>
 /// Configures concurrency limits for an Inngest function.
+/// Multiple attributes can be applied to create compound concurrency constraints
+/// (e.g., per-key serialization combined with a global cap).
 /// </summary>
 /// <example>
 /// <code>
@@ -16,9 +18,16 @@ namespace Inngest.Attributes;
 /// [EventTrigger("user/task.created")]
 /// [Concurrency(1, Key = "event.data.userId")]
 /// public class UserProcessor : IInngestFunction { }
+///
+/// // Multiple constraints: per-payment serialization + global cap
+/// [InngestFunction("payment-processor")]
+/// [EventTrigger("payment/created")]
+/// [Concurrency(1, Key = "event.data.paymentId")]  // Per-key serialization
+/// [Concurrency(5)]                                  // Global cap for DB protection
+/// public class PaymentProcessor : IInngestFunction { }
 /// </code>
 /// </example>
-[AttributeUsage(AttributeTargets.Class, AllowMultiple = false, Inherited = false)]
+[AttributeUsage(AttributeTargets.Class, AllowMultiple = true, Inherited = false)]
 public sealed class ConcurrencyAttribute : Attribute
 {
     /// <summary>

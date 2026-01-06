@@ -36,6 +36,12 @@ public class FunctionDefinition
     public List<StepDefinition> Steps { get; } = new();
 
     /// <summary>
+    /// The type of the onFailure handler, if configured.
+    /// When set, a companion function is generated that triggers on inngest/function.failed.
+    /// </summary>
+    public Type? FailureHandlerType { get; set; }
+
+    /// <summary>
     /// Create a new function definition
     /// </summary>
     public FunctionDefinition(string id, string name, FunctionTrigger[] triggers, Func<InngestContext, Task<object>> handler, FunctionOptions? options = null)
@@ -105,14 +111,22 @@ public class EventConstraint
 public class FunctionOptions
 {
     /// <summary>
-    /// Maximum number of concurrent executions allowed (simple limit)
+    /// Maximum number of concurrent executions allowed (simple limit).
+    /// Deprecated: Use ConcurrencyConstraints for new code.
     /// </summary>
     public int? Concurrency { get; set; }
 
     /// <summary>
-    /// Advanced concurrency configuration with key and scope
+    /// Advanced concurrency configuration with key and scope (single constraint).
+    /// Deprecated: Use ConcurrencyConstraints for new code.
     /// </summary>
     public ConcurrencyOptions? ConcurrencyOptions { get; set; }
+
+    /// <summary>
+    /// Multiple concurrency constraints. Supports both per-key serialization
+    /// and global caps simultaneously.
+    /// </summary>
+    public List<ConcurrencyOptions>? ConcurrencyConstraints { get; set; }
 
     /// <summary>
     /// Retry configuration for failed executions
@@ -150,9 +164,15 @@ public class FunctionOptions
     public CancellationOptions? Cancellation { get; set; }
 
     /// <summary>
-    /// Idempotency key expression (CEL) to prevent duplicate executions
+    /// Idempotency key expression (CEL) to prevent duplicate executions.
+    /// Deprecated: Use IdempotencyOptions for new code (supports TTL/Period).
     /// </summary>
     public string? IdempotencyKey { get; set; }
+
+    /// <summary>
+    /// Idempotency configuration with key and optional TTL period.
+    /// </summary>
+    public IdempotencyOptions? Idempotency { get; set; }
 
     /// <summary>
     /// Timeout configuration to automatically cancel runs that take too long
@@ -315,6 +335,26 @@ public class TimeoutOptions
     /// If exceeded, the run is cancelled during execution.
     /// </summary>
     public string? Finish { get; set; }
+}
+
+/// <summary>
+/// Idempotency configuration to prevent duplicate function executions
+/// </summary>
+public class IdempotencyOptions
+{
+    /// <summary>
+    /// CEL expression that evaluates to the idempotency key.
+    /// Events with the same key will only be processed once within the TTL period.
+    /// </summary>
+    public string Key { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Time-to-live period for the idempotency key.
+    /// Uses Inngest time string format (e.g., "1h", "24h", "7d").
+    /// After this period expires, the same key can trigger a new execution.
+    /// If not specified, Inngest uses its default TTL.
+    /// </summary>
+    public string? Period { get; set; }
 }
 
 /// <summary>

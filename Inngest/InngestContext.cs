@@ -108,14 +108,42 @@ public class RunContext
     public string FunctionId { get; init; } = string.Empty;
 
     /// <summary>
-    /// The current attempt number (0 for first attempt)
+    /// The current attempt number (0-indexed).
+    /// First attempt = 0, second attempt = 1, etc.
     /// </summary>
+    /// <remarks>
+    /// When using with MaxAttempts, note that:
+    /// - If MaxAttempts = 3, valid Attempt values are 0, 1, 2
+    /// - IsFinalAttempt is true when Attempt == MaxAttempts - 1
+    /// </remarks>
     public int Attempt { get; init; }
+
+    /// <summary>
+    /// Maximum number of attempts configured for this function.
+    /// This is the total number of times the function will be executed
+    /// (first attempt + retries).
+    /// </summary>
+    /// <remarks>
+    /// This value comes from the [Retry(Attempts = N)] attribute.
+    /// If not specified, defaults to the Inngest platform default (typically 4).
+    /// </remarks>
+    public int MaxAttempts { get; init; } = 4; // Inngest default
 
     /// <summary>
     /// Whether this is a replay (re-execution with memoized state)
     /// </summary>
     public bool IsReplay { get; init; }
+
+    /// <summary>
+    /// Returns true if this is the final attempt (no more retries will occur).
+    /// Use this to perform terminal actions like sending failure notifications.
+    /// </summary>
+    /// <remarks>
+    /// This is equivalent to checking Attempt == MaxAttempts - 1.
+    /// If the function succeeds on this attempt, no failure handlers run.
+    /// If it fails, the onFailure handler (if configured) will be triggered.
+    /// </remarks>
+    public bool IsFinalAttempt => Attempt >= MaxAttempts - 1;
 }
 
 /// <summary>

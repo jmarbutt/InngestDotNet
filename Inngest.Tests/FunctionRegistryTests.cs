@@ -194,10 +194,11 @@ public class FunctionRegistryTests
         Assert.NotNull(registration.Options.Retry);
         Assert.Equal(5, registration.Options.Retry.Attempts);
 
-        // Concurrency
-        Assert.NotNull(registration.Options.ConcurrencyOptions);
-        Assert.Equal(10, registration.Options.ConcurrencyOptions.Limit);
-        Assert.Equal("event.data.userId", registration.Options.ConcurrencyOptions.Key);
+        // Concurrency - now uses ConcurrencyConstraints list
+        Assert.NotNull(registration.Options.ConcurrencyConstraints);
+        Assert.Single(registration.Options.ConcurrencyConstraints);
+        Assert.Equal(10, registration.Options.ConcurrencyConstraints[0].Limit);
+        Assert.Equal("event.data.userId", registration.Options.ConcurrencyConstraints[0].Key);
 
         // Rate limit
         Assert.NotNull(registration.Options.RateLimit);
