@@ -1,6 +1,9 @@
 using System.Reflection;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using Inngest.Steps;
 
 namespace Inngest.Internal;
 
@@ -144,4 +147,128 @@ internal static class FunctionAdapter
             PropertyNameCaseInsensitive = true
         });
     }
+
+    /// <summary>
+    /// Creates a handler delegate for a failure handler
+    /// </summary>
+    public static Func<InngestContext, Task<object>> CreateFailureHandler(
+        Type failureHandlerType,
+        string parentFunctionId,
+        IServiceProvider serviceProvider)
+    {
+        return async (context) =>
+        {
+            // Create a new scope for each invocation to support scoped services
+            using var scope = serviceProvider.CreateScope();
+            var scopedProvider = scope.ServiceProvider;
+
+            // Resolve the failure handler instance through DI
+            var handler = (IInngestFailureHandler)scopedProvider.GetRequiredService(failureHandlerType);
+
+            // Parse the inngest/function.failed event data
+            var (failureInfo, originalEvent) = ParseFailureEvent(context.Event);
+
+            // Verify this failure is for our parent function
+            if (failureInfo.FunctionId != parentFunctionId)
+            {
+                // This shouldn't happen if the trigger filter is set correctly,
+                // but guard against it anyway
+                return new { skipped = true, reason = "function_id_mismatch" };
+            }
+
+            // Create the failure context
+            var failureContext = new FailureContext(
+                failureInfo,
+                originalEvent,
+                context.Step,
+                context.Run,
+                context.Logger,
+                context.CancellationToken);
+
+            // Execute the failure handler
+            await handler.HandleFailureAsync(failureContext, context.CancellationToken);
+
+            return new { handled = true };
+        };
+    }
+
+    /// <summary>
+    /// Parse the inngest/function.failed event into a FunctionFailureInfo
+    /// </summary>
+    private static (FunctionFailureInfo Info, InngestEvent OriginalEvent) ParseFailureEvent(InngestEvent failedEvent)
+    {
+        var jsonOptions = new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            PropertyNameCaseInsensitive = true
+        };
+
+        // The event data contains: function_id, run_id, error, event (original)
+        JsonElement data;
+        if (failedEvent.Data is JsonElement je)
+        {
+            data = je;
+        }
+        else if (failedEvent.Data != null)
+        {
+            var json = JsonSerializer.Serialize(failedEvent.Data, jsonOptions);
+            data = JsonSerializer.Deserialize<JsonElement>(json, jsonOptions);
+        }
+        else
+        {
+            throw new InvalidOperationException("inngest/function.failed event has no data");
+        }
+
+        var functionId = data.TryGetProperty("function_id", out var fidProp)
+            ? fidProp.GetString() ?? ""
+            : "";
+
+        var runId = data.TryGetProperty("run_id", out var ridProp)
+            ? ridProp.GetString() ?? ""
+            : "";
+
+        FunctionError error;
+        if (data.TryGetProperty("error", out var errorProp))
+        {
+            error = new FunctionError
+            {
+                Name = errorProp.TryGetProperty("name", out var nameProp)
+                    ? nameProp.GetString() ?? "Error"
+                    : "Error",
+                Message = errorProp.TryGetProperty("message", out var msgProp)
+                    ? msgProp.GetString() ?? ""
+                    : "",
+                Stack = errorProp.TryGetProperty("stack", out var stackProp)
+                    ? stackProp.GetString()
+                    : null
+            };
+        }
+        else
+        {
+            error = new FunctionError { Message = "Unknown error" };
+        }
+
+        // Parse the original event
+        InngestEvent originalEvent;
+        if (data.TryGetProperty("event", out var eventProp))
+        {
+            originalEvent = eventProp.Deserialize<InngestEvent>(jsonOptions) ?? new InngestEvent();
+        }
+        else
+        {
+            originalEvent = new InngestEvent();
+        }
+
+        var info = new FunctionFailureInfo
+        {
+            FunctionId = functionId,
+            RunId = runId,
+            Error = error
+        };
+
+        return (info, originalEvent);
+    }
+
+    // Extension class to include OriginalEvent in FunctionFailureInfo
+    private record struct ParsedFailureInfo(FunctionFailureInfo Info, InngestEvent OriginalEvent);
 }
