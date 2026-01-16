@@ -30,7 +30,7 @@ public class InngestClient : IInngestClient
     private readonly string _environment;
     private readonly bool _isDev;
     private readonly bool _disableCronTriggersInDev;
-    private readonly string _sdkVersion = "1.4.0";
+    private readonly string _sdkVersion = "1.4.1";
     private readonly string _appId;
     private readonly ILogger _logger;
     private readonly IInngestFunctionRegistry? _registry;
@@ -343,20 +343,22 @@ public class InngestClient : IInngestClient
         response.Headers["X-Inngest-Sdk"] = $"inngest-dotnet:v{_sdkVersion}";
         response.Headers["X-Inngest-Req-Version"] = "1";
 
-        // Verify signature only on requests that carry a body (PUT/POST). GET introspection is allowed to be unauthenticated.
-        if (!_isDev && (request.Method == "PUT" || request.Method == "POST") && !await VerifySignature(context))
-        {
-            response.StatusCode = StatusCodes.Status401Unauthorized;
-            await response.WriteAsJsonAsync(new { error = "Invalid signature" });
-            return;
-        }
-
+        // Route by HTTP method
+        // Note: PUT (sync) and GET (introspection) do NOT require signatures
+        // Only POST (function calls) requires signature verification in production
         if (request.Method == "PUT")
         {
             await HandleSyncRequest(context);
         }
         else if (request.Method == "POST")
         {
+            // Verify the signature for function calls (POST only)
+            if (!_isDev && !await VerifySignature(context))
+            {
+                response.StatusCode = StatusCodes.Status500InternalServerError;
+                await response.WriteAsJsonAsync(new { error = "Invalid signature" });
+                return;
+            }
             await HandleCallRequest(context);
         }
         else if (request.Method == "GET")
