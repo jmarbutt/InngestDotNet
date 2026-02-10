@@ -30,7 +30,7 @@ public class InngestClient : IInngestClient
     private readonly string _environment;
     private readonly bool _isDev;
     private readonly bool _disableCronTriggersInDev;
-    private readonly string _sdkVersion = "1.4.3";
+    private readonly string _sdkVersion = "1.4.4";
     private readonly string _appId;
     private readonly ILogger _logger;
     private readonly IInngestFunctionRegistry? _registry;
@@ -361,7 +361,7 @@ public class InngestClient : IInngestClient
         var response = context.Response;
 
         // Add required headers to the response
-        response.Headers["X-Inngest-Sdk"] = $"inngest-dotnet:v{_sdkVersion}";
+        response.Headers["X-Inngest-Sdk"] = $"cs:v{_sdkVersion}";
         response.Headers["X-Inngest-Req-Version"] = "1";
 
         // Route by HTTP method
@@ -1169,7 +1169,7 @@ public class InngestClient : IInngestClient
             url = url,
             deployType = "ping",
             appName = _appId,
-            sdk = $"inngest-dotnet:v{_sdkVersion}",
+            sdk = $"cs:v{_sdkVersion}",
             v = "0.1",
             framework = "aspnetcore",
             functions = fnArray
@@ -1193,7 +1193,7 @@ public class InngestClient : IInngestClient
             Encoding.UTF8,
             "application/json");
         
-        requestMessage.Headers.Add("X-Inngest-Sdk", $"inngest-dotnet:v{_sdkVersion}");
+        requestMessage.Headers.Add("X-Inngest-Sdk", $"cs:v{_sdkVersion}");
         
         if (!_isDev && !string.IsNullOrEmpty(_signingKey))
         {
