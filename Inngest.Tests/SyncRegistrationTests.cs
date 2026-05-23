@@ -276,6 +276,63 @@ public class SyncRegistrationTests
         Assert.True(inspection.GetProperty("has_event_key").GetBoolean());
         Assert.True(inspection.GetProperty("has_signing_key").GetBoolean());
         Assert.Equal("dev", inspection.GetProperty("mode").GetString());
+
+        // capabilities.trust_probe must be advertised — without it Inngest Cloud
+        // rejects registrations with 400 "Invalid response returned".
+        Assert.True(inspection.TryGetProperty("capabilities", out var capabilities));
+        Assert.Equal("v1", capabilities.GetProperty("trust_probe").GetString());
+        Assert.Equal("v1", capabilities.GetProperty("in_band_sync").GetString());
+    }
+
+    [Fact]
+    public async Task HandleSync_OutOfBand_RegisterPayloadIncludesTrustProbeCapability()
+    {
+        // Arrange — out-of-band sync POSTs to {apiOrigin}/fn/register. Inngest
+        // Cloud rejects this with 400 "Invalid response returned" when the
+        // payload omits capabilities.trust_probe. Capture the outbound POST
+        // body and assert capabilities are present.
+        var options = new InngestOptions
+        {
+            AppId = "test-app",
+            IsDev = false,
+            EventKey = "test-event-key",
+            SigningKey = "signkey-prod-abc123"
+        };
+        options.ApplyEnvironmentFallbacks();
+
+        var registry = new InngestFunctionRegistry(options.AppId!);
+        registry.RegisterFunction(typeof(SyncTestFunction));
+
+        var services = new ServiceCollection();
+        services.AddSingleton<SyncTestFunction>();
+        var serviceProvider = services.BuildServiceProvider();
+
+        var handler = new MockHttpMessageHandler();
+        handler.QueueResponse(HttpStatusCode.OK, "{\"modified\":true}");
+
+        var client = new InngestClient(
+            options,
+            registry,
+            serviceProvider,
+            new HttpClient(handler),
+            NullLogger<InngestClient>.Instance);
+
+        var context = CreateHttpContext("PUT");
+        // No X-Inngest-Sync-Kind header => out-of-band path.
+
+        // Act
+        await client.HandleRequestAsync(context);
+
+        // Assert
+        var registerRequest = handler.Requests.Single(r =>
+            r.RequestUri != null && r.RequestUri.AbsolutePath.EndsWith("/fn/register"));
+        var sentBody = await registerRequest.Content!.ReadAsStringAsync();
+        var payload = JsonSerializer.Deserialize<JsonElement>(sentBody);
+
+        Assert.True(payload.TryGetProperty("capabilities", out var capabilities),
+            $"register payload missing 'capabilities' field: {sentBody}");
+        Assert.Equal("v1", capabilities.GetProperty("trust_probe").GetString());
+        Assert.Equal("v1", capabilities.GetProperty("in_band_sync").GetString());
     }
 
     [Fact]

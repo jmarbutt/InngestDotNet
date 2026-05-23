@@ -30,7 +30,7 @@ public class InngestClient : IInngestClient
     private readonly string _environment;
     private readonly bool _isDev;
     private readonly bool _disableCronTriggersInDev;
-    private readonly string _sdkVersion = "1.4.4";
+    private readonly string _sdkVersion = "1.4.5";
     private readonly string _appId;
     private readonly ILogger _logger;
     private readonly IInngestFunctionRegistry? _registry;
@@ -1058,10 +1058,14 @@ public class InngestClient : IInngestClient
         {
             _logger.LogInformation("In-band sync: returning {FunctionCount} functions with URL: {Url}", fnArray.Count, url);
 
-            // Build capabilities
+            // Build capabilities. trust_probe is required by Inngest Cloud as of the
+            // 2026-05 cloud rollout; without it /fn/register returns 400 "Invalid
+            // response returned". in_band_sync advertises that we can satisfy a
+            // signed in-band PUT.
             var capabilities = new Dictionary<string, string>
             {
-                ["in_band_sync"] = "v1"
+                ["in_band_sync"] = "v1",
+                ["trust_probe"] = "v1"
             };
 
             // Build inspection data
@@ -1163,7 +1167,9 @@ public class InngestClient : IInngestClient
         }
 
         // Out-of-band sync - POST to Inngest API
-        // Create register payload according to the SDK specification
+        // Create register payload according to the SDK specification.
+        // capabilities.trust_probe must be declared; Inngest Cloud rejects
+        // registrations without it with 400 "Invalid response returned".
         var registerPayload = new
         {
             url = url,
@@ -1172,7 +1178,12 @@ public class InngestClient : IInngestClient
             sdk = $"cs:v{_sdkVersion}",
             v = "0.1",
             framework = "aspnetcore",
-            functions = fnArray
+            functions = fnArray,
+            capabilities = new Dictionary<string, string>
+            {
+                ["trust_probe"] = "v1",
+                ["in_band_sync"] = "v1"
+            }
         };
 
         // Log information about registration for debugging
@@ -1617,6 +1628,11 @@ public class InngestClient : IInngestClient
             responseObj["api_origin"] = _apiOrigin;
             responseObj["event_api_origin"] = _eventApiOrigin;
             responseObj["app_id"] = _appId;
+            responseObj["capabilities"] = new Dictionary<string, string>
+            {
+                ["trust_probe"] = "v1",
+                ["in_band_sync"] = "v1"
+            };
             responseObj["env"] = _environment;
             responseObj["event_key_hash"] = eventKeyHash;
             responseObj["framework"] = "aspnetcore";
